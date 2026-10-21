@@ -1,0 +1,12 @@
+[package]
+name = "raft-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+raft = { path = "../raft" }
+kv-engine = { path = "../kv-engine" }
+crc32fast = "1"
+
+[dev-dependencies]
+proptest = "1"

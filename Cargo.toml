@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kv-engine"]
+members = ["crates/kv-engine", "crates/raft", "crates/raft-storage", "crates/lincheck", "crates/invariants", "crates/sim"]
 
 [workspace.package]
 edition = "2021"

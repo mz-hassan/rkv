@@ -377,6 +377,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "invariants"
+version = "0.1.0"
+dependencies = [
+ "raft",
+]
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -431,6 +438,14 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "lincheck"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.8",
+ "rand_chacha",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -598,6 +613,24 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "raft"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.8",
+ "rand_chacha",
+]
+
+[[package]]
+name = "raft-storage"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "kv-engine",
+ "proptest",
+ "raft",
+]
 
 [[package]]
 name = "rand"
@@ -799,6 +832,19 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "sim"
+version = "0.1.0"
+dependencies = [
+ "invariants",
+ "kv-engine",
+ "lincheck",
+ "raft",
+ "raft-storage",
+ "rand 0.8.8",
+ "rand_chacha",
 ]
 
 [[package]]

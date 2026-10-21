@@ -1,0 +1,13 @@
+[package]
+name = "sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+raft = { path = "../raft" }
+raft-storage = { path = "../raft-storage" }
+kv-engine = { path = "../kv-engine" }
+lincheck = { path = "../lincheck" }
+invariants = { path = "../invariants" }
+rand = "0.8"
+rand_chacha = "0.3"
