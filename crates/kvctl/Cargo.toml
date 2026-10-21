@@ -1,0 +1,11 @@
+[package]
+name = "kvctl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kv-client = { path = "../kv-client" }
+rkv-proto = { path = "../rkv-proto" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.12"

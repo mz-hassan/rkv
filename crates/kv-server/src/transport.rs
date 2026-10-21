@@ -13,17 +13,36 @@ use tonic::transport::Endpoint;
 
 pub type AddrBook = Arc<RwLock<HashMap<u64, String>>>;
 
+/// Runtime fault injection for Raft traffic (used by the chaos harness).
+#[derive(Default)]
+pub struct Faults {
+    pub blocked: RwLock<std::collections::HashSet<u64>>,
+    pub drop_pct: AtomicU64,
+    pub delay_ms: AtomicU64,
+}
+
+impl Faults {
+    pub fn should_drop(&self, peer: u64) -> bool {
+        if self.blocked.read().contains(&peer) {
+            return true;
+        }
+        let p = self.drop_pct.load(Ordering::Relaxed);
+        p > 0 && (rand::random::<u64>() % 100) < p
+    }
+}
+
 pub struct GrpcTransport {
     self_store: u64,
     addrs: AddrBook,
     senders: Mutex<HashMap<u64, mpsc::Sender<RaftMsg>>>,
     pub dropped: Arc<AtomicU64>,
     pub sent: Arc<AtomicU64>,
+    pub faults: Arc<Faults>,
 }
 
 impl GrpcTransport {
     pub fn new(self_store: u64, addrs: AddrBook) -> Arc<GrpcTransport> {
-        Arc::new(GrpcTransport { self_store, addrs, senders: Mutex::new(HashMap::new()), dropped: Arc::new(AtomicU64::new(0)), sent: Arc::new(AtomicU64::new(0)) })
+        Arc::new(GrpcTransport { self_store, addrs, senders: Mutex::new(HashMap::new()), dropped: Arc::new(AtomicU64::new(0)), sent: Arc::new(AtomicU64::new(0)), faults: Arc::new(Faults::default()) })
     }
 
     fn sender(&self, to: u64) -> Option<mpsc::Sender<RaftMsg>> {
@@ -36,6 +55,7 @@ impl GrpcTransport {
         let addr = self.addrs.read().get(&to).cloned()?;
         let (tx, mut rx) = mpsc::channel::<RaftMsg>(8192);
         let (dropped, sent, from) = (self.dropped.clone(), self.sent.clone(), self.self_store);
+        let faults = self.faults.clone();
         let addrs = self.addrs.clone();
         tokio::spawn(async move {
             let mut cur_addr = addr;
@@ -57,6 +77,10 @@ impl GrpcTransport {
                 if client.is_none() {
                     let ep = Endpoint::from_shared(format!("http://{cur_addr}")).unwrap().connect_timeout(Duration::from_millis(500)).timeout(Duration::from_secs(2)).tcp_nodelay(true);
                     client = Some(RaftTransportClient::new(ep.connect_lazy()).max_decoding_message_size(256 << 20).max_encoding_message_size(256 << 20));
+                }
+                let d = faults.delay_ms.load(Ordering::Relaxed);
+                if d > 0 {
+                    tokio::time::sleep(Duration::from_millis(d)).await;
                 }
                 let n = batch.len() as u64;
                 let mut req = RaftBatch { msgs: batch };
@@ -82,6 +106,10 @@ impl GrpcTransport {
 impl Transport for GrpcTransport {
     fn send(&self, group: u64, msg: Message) {
         let to = msg.to;
+        if self.faults.should_drop(to) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         let Some(tx) = self.sender(to) else {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return;

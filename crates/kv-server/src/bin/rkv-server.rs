@@ -43,6 +43,8 @@ async fn main() {
         cfg.group.snapshot_threshold = s.parse().unwrap();
     }
     cfg.group.sync = !a.iter().any(|x| x == "--no-raft-fsync");
+    cfg.group.pre_vote = !a.iter().any(|x| x == "--no-prevote");
+    cfg.group.check_quorum = !a.iter().any(|x| x == "--no-check-quorum");
     cfg.group.lease_reads = a.iter().any(|x| x == "--lease-reads");
     let store = Store::open(cfg).await.expect("open store");
     if let Some(h) = arg(&a, "--http") {

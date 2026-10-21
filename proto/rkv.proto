@@ -87,6 +87,8 @@ message MembershipReq { uint64 range_id = 1; repeated uint64 voters = 2; repeate
 message SplitReq { uint64 range_id = 1; bytes split_key = 2; }
 message AdminResp { Error error = 1; string msg = 2; }
 message CreateReplicaReq { uint64 range_id = 1; RangeInfo info = 2; }
+// Fault injection (chaos testing): affects Raft traffic of this store only
+message FaultsReq { repeated uint64 blocked_stores = 1; uint32 drop_pct = 2; uint32 delay_ms = 3; uint32 clock_rate_pct = 4; }
 
 service Kv {
   rpc Get(GetReq) returns (GetResp);
@@ -114,6 +116,7 @@ service Admin {
   rpc ChangeMembership(MembershipReq) returns (AdminResp);
   rpc SplitRange(SplitReq) returns (AdminResp);
   rpc CreateReplica(CreateReplicaReq) returns (AdminResp);
+  rpc SetFaults(FaultsReq) returns (AdminResp);
 }
 
 // ---- placement driver

@@ -1,0 +1,25 @@
+[package]
+name = "ycsb"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# RocksDB baseline for S1 (compiles C++ RocksDB: slow first build)
+rocksdb-baseline = ["dep:rocksdb"]
+
+[lib]
+name = "ycsb"
+
+[[bin]]
+name = "rkv-bench"
+path = "src/bin/rkv-bench.rs"
+
+[dependencies]
+kv-engine = { path = "../kv-engine" }
+kv-client = { path = "../kv-client" }
+rkv-proto = { path = "../rkv-proto" }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
+rand_chacha = "0.3"
+serde_json = "1"
+rocksdb = { version = "0.22", optional = true, default-features = false, features = ["lz4"] }

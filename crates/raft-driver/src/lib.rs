@@ -95,11 +95,13 @@ pub struct GroupOptions {
     pub inbox: usize,
     pub lease_reads: bool,
     pub max_uncommitted: u64,
+    /// logical clock speed in percent (100 = nominal); chaos tests change it to emulate clock skew
+    pub clock_rate: Arc<AtomicU64>,
 }
 
 impl Default for GroupOptions {
     fn default() -> Self {
-        GroupOptions { tick_ms: 20, election_tick: 10, heartbeat_tick: 2, pre_vote: true, check_quorum: true, snapshot_threshold: 20_000, sync: true, inbox: 4096, lease_reads: false, max_uncommitted: 4096 }
+        GroupOptions { tick_ms: 20, election_tick: 10, heartbeat_tick: 2, pre_vote: true, check_quorum: true, snapshot_threshold: 20_000, sync: true, inbox: 4096, lease_reads: false, max_uncommitted: 4096, clock_rate: Arc::new(AtomicU64::new(100)) }
     }
 }
 
@@ -199,10 +201,15 @@ impl GroupTask {
     async fn run(mut self, mut rx: mpsc::Receiver<Cmd>) {
         let mut ticker = tokio::time::interval(Duration::from_millis(self.opts.tick_ms));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut acc: u64 = 0;
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    self.raft.tick();
+                    acc += self.opts.clock_rate.load(Ordering::Relaxed);
+                    while acc >= 100 {
+                        acc -= 100;
+                        self.raft.tick();
+                    }
                 }
                 cmd = rx.recv() => {
                     let Some(cmd) = cmd else { break };

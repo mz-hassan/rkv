@@ -298,6 +298,9 @@ impl Kv for KvSvc {
 impl RaftTransport for RaftSvc {
     async fn send(&self, req: Request<RaftBatch>) -> Res<Empty> {
         for m in req.into_inner().msgs {
+            if self.0.transport.faults.should_drop(m.from_store) {
+                continue; // injected partition: incoming direction
+            }
             self.0.deliver(m.range_id, m.from_store, &m.data);
         }
         Ok(Response::new(Empty {}))
@@ -376,6 +379,16 @@ impl Admin for AdminSvc {
             Ok(()) => aok("split applied"),
             Err(m) => aerr(6, &m),
         }))
+    }
+
+    async fn set_faults(&self, req: Request<FaultsReq>) -> Res<AdminResp> {
+        let r = req.into_inner();
+        let f = &self.0.transport.faults;
+        *f.blocked.write() = r.blocked_stores.into_iter().collect();
+        f.drop_pct.store(r.drop_pct as u64, Ordering::Relaxed);
+        f.delay_ms.store(r.delay_ms as u64, Ordering::Relaxed);
+        self.0.cfg.group.clock_rate.store(if r.clock_rate_pct == 0 { 100 } else { r.clock_rate_pct as u64 }, Ordering::Relaxed);
+        Ok(Response::new(aok("faults updated")))
     }
 
     async fn create_replica(&self, req: Request<CreateReplicaReq>) -> Res<AdminResp> {
