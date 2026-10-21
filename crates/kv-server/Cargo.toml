@@ -1,0 +1,31 @@
+[package]
+name = "kv-server"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "kv_server"
+
+[[bin]]
+name = "rkv-server"
+path = "src/bin/rkv-server.rs"
+
+[dependencies]
+kv-engine = { path = "../kv-engine" }
+raft = { path = "../raft" }
+raft-storage = { path = "../raft-storage" }
+raft-driver = { path = "../raft-driver" }
+txn = { path = "../txn" }
+kv-client = { path = "../kv-client" }
+rkv-proto = { path = "../rkv-proto" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+prost = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

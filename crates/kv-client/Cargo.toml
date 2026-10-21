@@ -1,0 +1,14 @@
+[package]
+name = "kv-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rkv-proto = { path = "../rkv-proto" }
+txn = { path = "../txn" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+parking_lot = "0.12"
+rand = "0.8"
+tracing = "0.1"

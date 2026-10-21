@@ -1,0 +1,145 @@
+syntax = "proto3";
+package rkv;
+
+message Empty {}
+
+message Peer {
+  uint64 store_id = 1;
+  string addr = 2;
+  bool learner = 3;
+}
+
+message RangeInfo {
+  uint64 id = 1;
+  bytes start = 2;
+  bytes end = 3;          // empty = +infinity
+  uint64 version = 4;     // bumped on split/merge
+  uint64 conf_ver = 5;    // bumped on membership change
+  repeated Peer peers = 6;
+  uint64 leader_store = 7;
+}
+
+// Error codes: 1 NOT_LEADER, 2 RANGE_MOVED, 3 BUSY, 4 NO_RANGE, 5 UNKNOWN_OUTCOME, 6 OTHER
+message Error {
+  uint32 code = 1;
+  string msg = 2;
+  Peer leader = 3;
+  repeated RangeInfo ranges = 4;
+}
+
+message Context {
+  uint64 range_id = 1;
+  uint64 version = 2;      // client's view of the range version
+  uint32 read_mode = 3;    // 0 linearizable (ReadIndex), 1 lease, 2 follower-stale
+  uint64 max_staleness_ms = 4;
+}
+
+// ---- raw (non-transactional) API
+message GetReq { Context ctx = 1; bytes key = 2; }
+message GetResp { Error error = 1; bool found = 2; bytes value = 3; }
+message PutReq { Context ctx = 1; bytes key = 2; bytes value = 3; uint64 client_id = 4; uint64 seq = 5; uint64 ttl_ms = 6; }
+message DeleteReq { Context ctx = 1; bytes key = 2; uint64 client_id = 3; uint64 seq = 4; }
+message WriteResp { Error error = 1; }
+message CasReq { Context ctx = 1; bytes key = 2; bool has_expect = 3; bytes expect = 4; bytes new_value = 5; uint64 client_id = 6; uint64 seq = 7; }
+message CasResp { Error error = 1; bool success = 2; }
+message ScanReq { Context ctx = 1; bytes start = 2; bytes end = 3; uint32 limit = 4; }
+message Pair { bytes key = 1; bytes value = 2; }
+message ScanResp { Error error = 1; repeated Pair pairs = 2; }
+
+// ---- transactional (Percolator) API
+message LockInfo { bytes key = 1; bytes primary = 2; uint64 start_ts = 3; uint64 ttl_ms = 4; }
+message TxnGetReq { Context ctx = 1; bytes key = 2; uint64 ts = 3; }
+message TxnGetResp { Error error = 1; bool found = 2; bytes value = 3; LockInfo lock = 4; }
+message TxnScanReq { Context ctx = 1; bytes start = 2; bytes end = 3; uint32 limit = 4; uint64 ts = 5; }
+message TxnScanResp { Error error = 1; repeated Pair pairs = 2; LockInfo lock = 3; }
+message Mutation { uint32 op = 1; bytes key = 2; bytes value = 3; }   // op: 1 put, 2 delete, 3 lock-only (read validation)
+message KeyError { LockInfo locked = 1; bool write_conflict = 2; uint64 conflict_ts = 3; bytes key = 4; string other = 5; }
+message PrewriteReq {
+  Context ctx = 1; repeated Mutation mutations = 2; bytes primary = 3; uint64 start_ts = 4; uint64 ttl_ms = 5;
+  repeated bytes read_keys = 6;   // serializable mode: keys read, validated for no newer commits
+  uint64 now_ms = 7;
+}
+message PrewriteResp { Error error = 1; repeated KeyError errors = 2; }
+message CommitReq { Context ctx = 1; repeated bytes keys = 2; uint64 start_ts = 3; uint64 commit_ts = 4; }
+message CommitResp { Error error = 1; KeyError key_error = 2; }
+message RollbackReq { Context ctx = 1; repeated bytes keys = 2; uint64 start_ts = 3; }
+message CheckTxnStatusReq { Context ctx = 1; bytes primary = 2; uint64 start_ts = 3; uint64 now_ms = 4; bool rollback_if_not_exist = 5; }
+// action: 0 locked (alive), 1 committed, 2 rolled back (or expired lock rolled back), 3 no lock/no record
+message CheckTxnStatusResp { Error error = 1; uint32 action = 2; uint64 commit_ts = 3; uint64 ttl_ms = 4; }
+message ResolveLockReq { Context ctx = 1; uint64 start_ts = 2; uint64 commit_ts = 3; repeated bytes keys = 4; }
+
+// ---- watch / CDC
+message WatchReq { Context ctx = 1; bytes start = 2; bytes end = 3; }
+message Event { uint64 index = 1; bytes key = 2; bytes value = 3; bool deleted = 4; }
+
+// ---- raft transport
+message RaftMsg { uint64 range_id = 1; bytes data = 2; uint64 from_store = 3; }
+message RaftBatch { repeated RaftMsg msgs = 1; }
+
+// ---- admin
+message RangeStatus {
+  RangeInfo info = 1; uint64 term = 2; uint64 commit = 3; uint64 applied = 4;
+  bool is_leader = 5; uint64 approx_bytes = 6; uint64 write_qps = 7; uint64 read_qps = 8;
+}
+message StatusResp { uint64 store_id = 1; string addr = 2; repeated RangeStatus ranges = 3; }
+message TransferLeaderReq { uint64 range_id = 1; uint64 to_store = 2; }
+message MembershipReq { uint64 range_id = 1; repeated uint64 voters = 2; repeated uint64 learners = 3; }
+message SplitReq { uint64 range_id = 1; bytes split_key = 2; }
+message AdminResp { Error error = 1; string msg = 2; }
+message CreateReplicaReq { uint64 range_id = 1; RangeInfo info = 2; }
+
+service Kv {
+  rpc Get(GetReq) returns (GetResp);
+  rpc Put(PutReq) returns (WriteResp);
+  rpc Delete(DeleteReq) returns (WriteResp);
+  rpc Cas(CasReq) returns (CasResp);
+  rpc Scan(ScanReq) returns (ScanResp);
+  rpc TxnGet(TxnGetReq) returns (TxnGetResp);
+  rpc TxnScan(TxnScanReq) returns (TxnScanResp);
+  rpc Prewrite(PrewriteReq) returns (PrewriteResp);
+  rpc Commit(CommitReq) returns (CommitResp);
+  rpc Rollback(RollbackReq) returns (WriteResp);
+  rpc CheckTxnStatus(CheckTxnStatusReq) returns (CheckTxnStatusResp);
+  rpc ResolveLock(ResolveLockReq) returns (WriteResp);
+  rpc Watch(WatchReq) returns (stream Event);
+}
+
+service RaftTransport {
+  rpc Send(RaftBatch) returns (Empty);
+}
+
+service Admin {
+  rpc Status(Empty) returns (StatusResp);
+  rpc TransferLeader(TransferLeaderReq) returns (AdminResp);
+  rpc ChangeMembership(MembershipReq) returns (AdminResp);
+  rpc SplitRange(SplitReq) returns (AdminResp);
+  rpc CreateReplica(CreateReplicaReq) returns (AdminResp);
+}
+
+// ---- placement driver
+message StoreInfo { uint64 id = 1; string addr = 2; uint64 range_count = 3; uint64 leader_count = 4; uint64 bytes = 5; uint64 last_seen_ms = 6; bool alive = 7; }
+message RangeReport { RangeInfo info = 1; uint64 term = 2; uint64 approx_bytes = 3; uint64 write_qps = 4; uint64 read_qps = 5; bool is_leader = 6; }
+message HeartbeatReq { StoreInfo store = 1; repeated RangeReport ranges = 2; }
+// command kinds: 1 add_peer(learner), 2 promote, 3 remove_peer, 4 transfer_leader, 5 split
+message PdCommand { uint32 kind = 1; uint64 range_id = 2; uint64 store_id = 3; bytes split_key = 4; }
+message HeartbeatResp { Error error = 1; repeated PdCommand commands = 2; repeated StoreInfo stores = 3; }
+message RouteReq { bytes key = 1; bool by_id = 2; uint64 range_id = 3; }
+message RouteResp { Error error = 1; RangeInfo range = 2; }
+message AllRangesResp { Error error = 1; repeated RangeInfo ranges = 2; repeated StoreInfo stores = 3; }
+message TsoReq { uint32 count = 1; }
+message TsoResp { Error error = 1; uint64 first = 2; uint32 count = 3; }   // timestamps first..first+count-1
+message AllocIdReq { uint32 count = 1; }
+message AllocIdResp { Error error = 1; uint64 first = 2; }
+message BootstrapReq { StoreInfo store = 1; }
+message PdPropose { bytes data = 1; }
+message SetConfigReq { string key = 1; string value = 2; }
+
+service Pd {
+  rpc Heartbeat(HeartbeatReq) returns (HeartbeatResp);
+  rpc GetRoute(RouteReq) returns (RouteResp);
+  rpc GetAllRanges(Empty) returns (AllRangesResp);
+  rpc Tso(TsoReq) returns (TsoResp);
+  rpc AllocId(AllocIdReq) returns (AllocIdResp);
+  rpc Bootstrap(BootstrapReq) returns (RouteResp);
+  rpc SetConfig(SetConfigReq) returns (AdminResp);
+}

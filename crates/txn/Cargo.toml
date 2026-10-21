@@ -1,0 +1,11 @@
+[package]
+name = "txn"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+raft = { path = "../raft" }
+
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
