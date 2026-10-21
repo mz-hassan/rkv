@@ -118,7 +118,7 @@ service Admin {
 
 // ---- placement driver
 message StoreInfo { uint64 id = 1; string addr = 2; uint64 range_count = 3; uint64 leader_count = 4; uint64 bytes = 5; uint64 last_seen_ms = 6; bool alive = 7; }
-message RangeReport { RangeInfo info = 1; uint64 term = 2; uint64 approx_bytes = 3; uint64 write_qps = 4; uint64 read_qps = 5; bool is_leader = 6; }
+message RangeReport { RangeInfo info = 1; uint64 term = 2; uint64 approx_bytes = 3; uint64 write_qps = 4; uint64 read_qps = 5; bool is_leader = 6; uint64 applied = 7; uint64 commit = 8; }
 message HeartbeatReq { StoreInfo store = 1; repeated RangeReport ranges = 2; }
 // command kinds: 1 add_peer(learner), 2 promote, 3 remove_peer, 4 transfer_leader, 5 split
 message PdCommand { uint32 kind = 1; uint64 range_id = 2; uint64 store_id = 3; bytes split_key = 4; }

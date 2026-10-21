@@ -1,0 +1,27 @@
+[package]
+name = "pd"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pd"
+
+[[bin]]
+name = "rkv-pd"
+path = "src/bin/rkv-pd.rs"
+
+[dependencies]
+kv-engine = { path = "../kv-engine" }
+raft = { path = "../raft" }
+raft-driver = { path = "../raft-driver" }
+rkv-proto = { path = "../rkv-proto" }
+kv-client = { path = "../kv-client" }
+kv-server = { path = "../kv-server" }
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"

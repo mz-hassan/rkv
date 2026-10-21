@@ -457,7 +457,7 @@ impl Store {
                 if is_leader {
                     leaders += 1;
                 }
-                reports.push(RangeReport { info: Some(info), term: st.term, approx_bytes: ab, write_qps: wq, read_qps: rq, is_leader });
+                reports.push(RangeReport { info: Some(info), term: st.term, approx_bytes: ab, write_qps: wq, read_qps: rq, is_leader, applied: st.applied, commit: st.commit });
             }
             let store = StoreInfo { id: self.cfg.store_id, addr: self.cfg.addr.clone(), range_count: reports.len() as u64, leader_count: leaders, bytes, last_seen_ms: now_ms(), alive: true };
             if !bootstrapped && reports.is_empty() {
@@ -513,7 +513,10 @@ impl Store {
                     let mut ai = info.clone();
                     ai.peers.push(Peer { store_id: c.store_id, addr: addr.clone(), learner: true });
                     let mut ac = rkv_proto::admin_client::AdminClient::new(::kv_client::pd::channel(&addr)?);
-                    ac.create_replica(CreateReplicaReq { range_id: c.range_id, info: Some(ai) }).await.map_err(|e| e.to_string())?;
+                    let cr = ac.create_replica(CreateReplicaReq { range_id: c.range_id, info: Some(ai) }).await.map_err(|e| e.to_string())?.into_inner();
+                    if let Some(er) = cr.error {
+                        return Err(format!("create_replica on store {} failed: {}", c.store_id, er.msg));
+                    }
                     let mut learners = m.learners.clone();
                     learners.insert(c.store_id);
                     rep.handle.change_membership(m.voters.clone(), learners).await.map_err(|e| format!("{e:?}"))
@@ -542,7 +545,8 @@ impl Store {
         }
         .await;
         if let Err(e) = res {
-            tracing::debug!(range = c.range_id, kind = c.kind, "pd command failed: {e}");
+            eprintln!("[store {}] pd command kind={} range={} store={} failed: {e}", self.cfg.store_id, c.kind, c.range_id, c.store_id);
+            tracing::warn!(range = c.range_id, kind = c.kind, "pd command failed: {e}");
         }
     }
 }

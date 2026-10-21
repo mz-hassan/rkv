@@ -869,6 +869,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pd"
+version = "0.1.0"
+dependencies = [
+ "kv-client",
+ "kv-engine",
+ "kv-server",
+ "parking_lot",
+ "raft",
+ "raft-driver",
+ "rkv-proto",
+ "tempfile",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
