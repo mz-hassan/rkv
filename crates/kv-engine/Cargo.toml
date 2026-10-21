@@ -1,0 +1,15 @@
+[package]
+name = "kv-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crc32fast = "1"
+parking_lot = "0.12"
+rand = "0.8"
+rand_chacha = "0.3"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+criterion = "0.5"
