@@ -55,7 +55,15 @@ fn covers(r: &RangeInfo, key: &[u8]) -> bool {
 
 impl Router {
     pub fn new(pd: Option<Arc<PdClient>>, seeds: Vec<String>) -> Arc<Router> {
-        Arc::new(Router { pd, seeds, ranges: RwLock::new(BTreeMap::new()), leaders: RwLock::new(HashMap::new()), stores: RwLock::new(HashMap::new()), chans: Mutex::new(HashMap::new()), retries: Default::default() })
+        Arc::new(Router {
+            pd,
+            seeds,
+            ranges: RwLock::new(BTreeMap::new()),
+            leaders: RwLock::new(HashMap::new()),
+            stores: RwLock::new(HashMap::new()),
+            chans: Mutex::new(HashMap::new()),
+            retries: Default::default(),
+        })
     }
 
     pub fn chan(&self, addr: &str) -> Channel {
@@ -223,7 +231,12 @@ impl Router {
             } else {
                 match leader {
                     Some(l) if attempt < 3 => Some(l),
-                    _ => info.peers.iter().filter(|p| !p.learner).nth(attempt as usize % info.peers.iter().filter(|p| !p.learner).count().max(1)).map(|p| p.store_id),
+                    _ => info
+                        .peers
+                        .iter()
+                        .filter(|p| !p.learner)
+                        .nth(attempt as usize % info.peers.iter().filter(|p| !p.learner).count().max(1))
+                        .map(|p| p.store_id),
                 }
             };
             let Some(store) = target else {

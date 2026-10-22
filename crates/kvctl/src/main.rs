@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 //! kvctl: command line client and cluster admin.
 //!
 //!   kvctl [--pd HOST:PORT[,..]] [--seeds HOST:PORT[,..]] <command> ...
@@ -22,7 +23,11 @@ use std::sync::Arc;
 fn opt(a: &mut Vec<String>, name: &str) -> Option<String> {
     let i = a.iter().position(|x| x == name)?;
     a.remove(i);
-    if i < a.len() { Some(a.remove(i)) } else { None }
+    if i < a.len() {
+        Some(a.remove(i))
+    } else {
+        None
+    }
 }
 
 fn csv(s: Option<String>) -> Vec<String> {
@@ -40,7 +45,9 @@ async fn main() {
     let seeds = csv(opt(&mut a, "--seeds"));
     let pd = if pd_addrs.is_empty() { None } else { Some(Arc::new(PdClient::new(pd_addrs.clone()))) };
     if a.is_empty() {
-        eprintln!("usage: kvctl [--pd ADDR] [--seeds ADDR,..] put|get|del|cas|scan|txn|watch|status|members|transfer-leader|split|tso|pd-config|pd-ranges|faults ...");
+        eprintln!(
+            "usage: kvctl [--pd ADDR] [--seeds ADDR,..] put|get|del|cas|scan|txn|watch|status|members|transfer-leader|split|tso|pd-config|pd-ranges|faults ..."
+        );
         std::process::exit(2);
     }
     let cmd = a.remove(0);
@@ -114,7 +121,11 @@ async fn main() {
                 let store = info.peers.iter().find(|p| p.store_id == info.leader_store).or(info.peers.first()).ok_or("no peers")?;
                 let mut kv = KvClient::new(::kv_client::pd::channel(&store.addr)?);
                 let ctx = Context { range_id: info.id, version: 0, read_mode: 0, max_staleness_ms: 0 };
-                let mut s = kv.watch(WatchReq { ctx: Some(ctx), start: a[0].as_bytes().to_vec(), end: a[1].as_bytes().to_vec() }).await.map_err(|e| e.to_string())?.into_inner();
+                let mut s = kv
+                    .watch(WatchReq { ctx: Some(ctx), start: a[0].as_bytes().to_vec(), end: a[1].as_bytes().to_vec() })
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_inner();
                 while let Some(ev) = s.message().await.map_err(|e| e.to_string())? {
                     println!("[{}] {} {} {}", ev.index, if ev.deleted { "DEL" } else { "PUT" }, show(&ev.key), show(&ev.value));
                 }
@@ -133,7 +144,19 @@ async fn main() {
                             println!("store {} @ {}", r.store_id, r.addr);
                             for rs in r.ranges {
                                 let i = rs.info.unwrap();
-                                println!("  range {:<14} [{:?}, {:?}) v{} {} term={} commit={} applied={} bytes={} peers={:?}", i.id, show(&i.start), show(&i.end), i.version, if rs.is_leader { "LEADER" } else { "follower" }, rs.term, rs.commit, rs.applied, rs.approx_bytes, i.peers.iter().map(|p| format!("{}{}", p.store_id, if p.learner { "L" } else { "" })).collect::<Vec<_>>());
+                                println!(
+                                    "  range {:<14} [{:?}, {:?}) v{} {} term={} commit={} applied={} bytes={} peers={:?}",
+                                    i.id,
+                                    show(&i.start),
+                                    show(&i.end),
+                                    i.version,
+                                    if rs.is_leader { "LEADER" } else { "follower" },
+                                    rs.term,
+                                    rs.commit,
+                                    rs.applied,
+                                    rs.approx_bytes,
+                                    i.peers.iter().map(|p| format!("{}{}", p.store_id, if p.learner { "L" } else { "" })).collect::<Vec<_>>()
+                                );
                             }
                         }
                         Err(e) => println!("store @ {addr}: unreachable ({})", e.message()),
@@ -145,7 +168,11 @@ async fn main() {
                 let voters: Vec<u64> = csv(opt(&mut a, "--voters")).iter().map(|x| x.parse().unwrap()).collect();
                 let learners: Vec<u64> = csv(opt(&mut a, "--learners")).iter().map(|x| x.parse().unwrap()).collect();
                 for addr in all_store_addrs(&pd, &seeds).await? {
-                    let r = AdminClient::new(::kv_client::pd::channel(&addr)?).change_membership(MembershipReq { range_id: range, voters: voters.clone(), learners: learners.clone() }).await.map_err(|e| e.to_string())?.into_inner();
+                    let r = AdminClient::new(::kv_client::pd::channel(&addr)?)
+                        .change_membership(MembershipReq { range_id: range, voters: voters.clone(), learners: learners.clone() })
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_inner();
                     if r.error.is_none() {
                         println!("{}", r.msg);
                         return Ok(());
@@ -157,7 +184,11 @@ async fn main() {
                 need(2, &a);
                 let (range, to): (u64, u64) = (a[0].parse().unwrap(), a[1].parse().unwrap());
                 for addr in all_store_addrs(&pd, &seeds).await? {
-                    let r = AdminClient::new(::kv_client::pd::channel(&addr)?).transfer_leader(TransferLeaderReq { range_id: range, to_store: to }).await.map_err(|e| e.to_string())?.into_inner();
+                    let r = AdminClient::new(::kv_client::pd::channel(&addr)?)
+                        .transfer_leader(TransferLeaderReq { range_id: range, to_store: to })
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_inner();
                     if r.error.is_none() {
                         println!("{}", r.msg);
                         return Ok(());
@@ -170,7 +201,11 @@ async fn main() {
                 let range: u64 = a[0].parse().unwrap();
                 let key = a.get(1).map(|k| k.as_bytes().to_vec()).unwrap_or_default();
                 for addr in all_store_addrs(&pd, &seeds).await? {
-                    let r = AdminClient::new(::kv_client::pd::channel(&addr)?).split_range(SplitReq { range_id: range, split_key: key.clone() }).await.map_err(|e| e.to_string())?.into_inner();
+                    let r = AdminClient::new(::kv_client::pd::channel(&addr)?)
+                        .split_range(SplitReq { range_id: range, split_key: key.clone() })
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_inner();
                     if r.error.is_none() {
                         println!("{}", r.msg);
                         return Ok(());
@@ -189,7 +224,11 @@ async fn main() {
                     // a freshly split child may not have elected a leader yet: retry for a few seconds
                     for _attempt in 0..20 {
                         for addr in all_store_addrs(&pd, &seeds).await? {
-                            let r = AdminClient::new(::kv_client::pd::channel(&addr)?).split_range(SplitReq { range_id: info.id, split_key: k.as_bytes().to_vec() }).await.map_err(|e| e.to_string())?.into_inner();
+                            let r = AdminClient::new(::kv_client::pd::channel(&addr)?)
+                                .split_range(SplitReq { range_id: info.id, split_key: k.as_bytes().to_vec() })
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .into_inner();
                             if r.error.is_none() {
                                 done = true;
                                 break;
@@ -221,7 +260,15 @@ async fn main() {
                     println!("store {} {} alive={} ranges={} leaders={}", s.id, s.addr, s.alive, s.range_count, s.leader_count);
                 }
                 for i in r.ranges {
-                    println!("range {} [{:?}, {:?}) v{} leader={} peers={:?}", i.id, show(&i.start), show(&i.end), i.version, i.leader_store, i.peers.iter().map(|p| format!("{}{}", p.store_id, if p.learner { "L" } else { "" })).collect::<Vec<_>>());
+                    println!(
+                        "range {} [{:?}, {:?}) v{} leader={} peers={:?}",
+                        i.id,
+                        show(&i.start),
+                        show(&i.end),
+                        i.version,
+                        i.leader_store,
+                        i.peers.iter().map(|p| format!("{}{}", p.store_id, if p.learner { "L" } else { "" })).collect::<Vec<_>>()
+                    );
                 }
             }
             "faults" => {
@@ -230,7 +277,11 @@ async fn main() {
                 let delay_ms: u32 = opt(&mut a, "--delay-ms").map(|v| v.parse().unwrap()).unwrap_or(0);
                 let clock: u32 = opt(&mut a, "--clock-pct").map(|v| v.parse().unwrap()).unwrap_or(100);
                 need(1, &a);
-                let r = AdminClient::new(::kv_client::pd::channel(&a[0])?).set_faults(FaultsReq { blocked_stores: block, drop_pct, delay_ms, clock_rate_pct: clock }).await.map_err(|e| e.to_string())?.into_inner();
+                let r = AdminClient::new(::kv_client::pd::channel(&a[0])?)
+                    .set_faults(FaultsReq { blocked_stores: block, drop_pct, delay_ms, clock_rate_pct: clock })
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .into_inner();
                 println!("{}", r.msg);
             }
             other => return Err(format!("unknown command {other}")),

@@ -21,7 +21,10 @@ pub enum Action {
     TransferLeader,
     /// make the next N fsyncs of a node fail (the node fail-stops)
     FailSync(u64),
-    ConfChange { voters: Vec<u64>, learners: Vec<u64> },
+    ConfChange {
+        voters: Vec<u64>,
+        learners: Vec<u64>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

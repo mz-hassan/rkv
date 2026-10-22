@@ -72,8 +72,21 @@ fn run(ops: Vec<Op>, style: CompactionStyle) {
             Op::Scan(a, b) => {
                 let (a, b) = (key(a.min(b)), key(a.max(b)));
                 let got = db.scan(&a, &b, 0).unwrap();
-                let want: Vec<_> = model.range(a..b).map(|(k, v)| (k.clone(), v.clone())).collect();
-                assert_eq!(got, want);
+                let want: Vec<_> = model.range(a.clone()..b.clone()).map(|(k, v)| (k.clone(), v.clone())).collect();
+                if got != want {
+                    let gk: Vec<String> = got.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect();
+                    let wk: Vec<String> = want.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect();
+                    let val_diff: Vec<String> = got
+                        .iter()
+                        .filter(|(k, v)| want.iter().any(|(k2, v2)| k2 == k && v2 != v))
+                        .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+                        .collect();
+                    panic!(
+                        "scan [{:?},{:?}) mismatch\n  engine keys: {gk:?}\n  model keys:  {wk:?}\n  keys with different VALUES: {val_diff:?}",
+                        String::from_utf8_lossy(&a),
+                        String::from_utf8_lossy(&b)
+                    );
+                }
             }
             Op::Flush => db.flush().unwrap(),
             Op::Compact => db.compact_until_idle().unwrap(),
@@ -132,7 +145,7 @@ fn never_policy_recovers_a_prefix() {
         fs.crash(seed);
         let db = Db::open(small_opts(SyncPolicy::Never, CompactionStyle::Leveled), vfs, "/db").unwrap();
         let got: BTreeMap<_, _> = db.scan(b"", b"", 0).unwrap().into_iter().collect();
-        assert!(prefixes.iter().any(|p| *p == got), "seed {seed}: recovered state is not a prefix of history");
+        assert!(prefixes.contains(&got), "seed {seed}: recovered state is not a prefix of history");
     }
 }
 

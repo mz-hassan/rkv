@@ -6,10 +6,10 @@ use crate::nemesis::{self, Action, Profile};
 use invariants::RaftInvariants;
 use kv_engine::MemFs;
 use lincheck::{OpKind, OpResult, Recorder, Verdict};
+use raft::{Config, EntryData, Membership, Message, ProposeError, Raft, Role};
+use raft_storage::RaftStorage;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use raft::{Config, EntryData, InitialState, Membership, Message, ProposeError, Raft, Role};
-use raft_storage::RaftStorage;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
@@ -131,6 +131,7 @@ enum Req {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // some fields exist for trace output only
 enum Ev {
     Tick { node: u64, inc: u64 },
     Deliver(Vec<u8>),
@@ -458,11 +459,7 @@ impl Sim {
                         if let Some(cmd) = Cmd::decode(bytes) {
                             let res = n.sm.apply(&cmd);
                             if let Some(p) = n.pending_w.remove(&e.index) {
-                                resp = Some(if p.term == e.term {
-                                    (p.c, p.op, RespBody::Write(res))
-                                } else {
-                                    (p.c, p.op, RespBody::Retry)
-                                });
+                                resp = Some(if p.term == e.term { (p.c, p.op, RespBody::Write(res)) } else { (p.c, p.op, RespBody::Retry) });
                             }
                         }
                     }
@@ -821,12 +818,12 @@ impl Sim {
             let ev = self.queue.remove(&(t, k)).unwrap();
             self.now = t;
             self.stats.events += 1;
-            if std::env::var("RKV_SIM_TRACE").is_ok() && self.stats.events % 200_000 == 0 {
+            if std::env::var("RKV_SIM_TRACE").is_ok() && self.stats.events.is_multiple_of(200_000) {
                 eprintln!("[sim trace] events={} now={} queue={} msgs_sent={}", self.stats.events, self.now, self.queue.len(), self.stats.msgs_sent);
             }
             // fail fast: once a safety invariant is broken the run is already a counterexample, and a
             // broken protocol can degenerate into a message storm
-            if self.stats.events % 1024 == 0 {
+            if self.stats.events.is_multiple_of(1024) {
                 if !self.inv.violations.is_empty() || !self.extra_violations.is_empty() {
                     break;
                 }

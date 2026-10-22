@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::new_without_default)]
 //! Linearizability checker: Wing & Gong search with Lowe's memoization
 //! (cache of (set of linearized ops, model state)), partitioned by key.
 //!
@@ -40,9 +41,13 @@ pub struct Op {
 pub enum Verdict {
     Linearizable,
     /// Not linearizable: the key whose sub-history cannot be linearized.
-    Violation { key: Vec<u8> },
+    Violation {
+        key: Vec<u8>,
+    },
     /// Search budget exhausted for this key: neither proven nor refuted.
-    Inconclusive { key: Vec<u8> },
+    Inconclusive {
+        key: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -239,10 +244,7 @@ mod tests {
 
     #[test]
     fn sequential_ok_and_stale_read_rejected() {
-        let h = vec![
-            op(0, OpKind::Write(v(1)), 0, Some(1), Some(OpResult::WriteOk)),
-            op(1, OpKind::Read, 2, Some(3), Some(OpResult::ReadOk(Some(v(1))))),
-        ];
+        let h = vec![op(0, OpKind::Write(v(1)), 0, Some(1), Some(OpResult::WriteOk)), op(1, OpKind::Read, 2, Some(3), Some(OpResult::ReadOk(Some(v(1)))))];
         assert_eq!(check(&h, 1_000_000).0, Verdict::Linearizable);
         let h = vec![
             op(0, OpKind::Write(v(1)), 0, Some(1), Some(OpResult::WriteOk)),
@@ -266,10 +268,7 @@ mod tests {
     fn pending_write_may_or_may_not_apply() {
         // write never returned; a later read sees it: fine. A later read not seeing it: fine too.
         for seen in [Some(v(9)), None] {
-            let h = vec![
-                op(0, OpKind::Write(v(9)), 0, None, None),
-                op(1, OpKind::Read, 5, Some(6), Some(OpResult::ReadOk(seen))),
-            ];
+            let h = vec![op(0, OpKind::Write(v(9)), 0, None, None), op(1, OpKind::Read, 5, Some(6), Some(OpResult::ReadOk(seen)))];
             assert_eq!(check(&h, 1_000_000).0, Verdict::Linearizable);
         }
         // but it cannot appear, vanish, and reappear
@@ -390,10 +389,7 @@ mod tests {
     #[test]
     fn mutation_lost_acked_write_and_double_apply() {
         // lost write: acked write, then read sees None
-        let h = vec![
-            op(0, OpKind::Write(v(1)), 0, Some(1), Some(OpResult::WriteOk)),
-            op(1, OpKind::Read, 2, Some(3), Some(OpResult::ReadOk(None))),
-        ];
+        let h = vec![op(0, OpKind::Write(v(1)), 0, Some(1), Some(OpResult::WriteOk)), op(1, OpKind::Read, 2, Some(3), Some(OpResult::ReadOk(None)))];
         assert!(matches!(check(&h, 1000).0, Verdict::Violation { .. }));
         // double apply: a CAS-increment style op observed applying twice
         let h = vec![

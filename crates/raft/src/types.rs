@@ -68,7 +68,10 @@ pub enum EntryData {
     Noop,
     Normal(Vec<u8>),
     /// Enter joint consensus: new voters/learners; old voters become `outgoing`.
-    ConfEnterJoint { voters: BTreeSet<NodeId>, learners: BTreeSet<NodeId> },
+    ConfEnterJoint {
+        voters: BTreeSet<NodeId>,
+        learners: BTreeSet<NodeId>,
+    },
     ConfLeaveJoint,
     /// Replace membership directly (only legal if the voter set is unchanged, or at bootstrap).
     ConfSet(Membership),

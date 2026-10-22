@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use txn::keys::*;
-use txn::percolator::{self, Batch, KeyError, MutOp, TxnStatus, TxnStore};
+use txn::percolator::{self, Batch, TxnStatus, TxnStore};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RangeDesc {
@@ -162,7 +162,17 @@ impl RangeSm {
             }
         }
         let (events, _) = broadcast::channel(8192);
-        let sm = Arc::new(RangeSm { db, id, desc: RwLock::new(desc), applied: AtomicU64::new(applied), sessions: Mutex::new(sessions), events, split_tx, approx_bytes: AtomicU64::new(0), writes: AtomicU64::new(0) });
+        let sm = Arc::new(RangeSm {
+            db,
+            id,
+            desc: RwLock::new(desc),
+            applied: AtomicU64::new(applied),
+            sessions: Mutex::new(sessions),
+            events,
+            split_tx,
+            approx_bytes: AtomicU64::new(0),
+            writes: AtomicU64::new(0),
+        });
         sm.recompute_size();
         sm
     }
@@ -279,12 +289,20 @@ impl RangeSm {
 
     // ------------------------------------------------------------ apply
 
-    fn exec(&self, index: u64, cmd: Cmd, ov: &mut Overlay, events: &mut Vec<Event>, splits: &mut Vec<SplitEvent>, sessions: &mut BTreeMap<u64, (u64, Vec<u8>)>) -> Resp {
+    fn exec(
+        &self,
+        index: u64,
+        cmd: Cmd,
+        ov: &mut Overlay,
+        events: &mut Vec<Event>,
+        splits: &mut Vec<SplitEvent>,
+        sessions: &mut BTreeMap<u64, (u64, Vec<u8>)>,
+    ) -> Resp {
         let d = self.desc();
         if cmd.keys().iter().any(|k| !d.contains(k)) {
             return Resp::RangeMoved;
         }
-        let mut dedup = |client: u64, seq: u64, sessions: &BTreeMap<u64, (u64, Vec<u8>)>| -> Option<Resp> {
+        let dedup = |client: u64, seq: u64, sessions: &BTreeMap<u64, (u64, Vec<u8>)>| -> Option<Resp> {
             if client == 0 {
                 return None;
             }
@@ -369,7 +387,12 @@ impl RangeSm {
                     if let Some(l) = percolator::get_lock(ov, k) {
                         if l.start_ts == start_ts {
                             match l.op {
-                                1 => events.push(Event { index, key: k.clone(), value: ov.get(&versioned_key(CF_DATA, k, start_ts)).unwrap_or_default(), deleted: false }),
+                                1 => events.push(Event {
+                                    index,
+                                    key: k.clone(),
+                                    value: ov.get(&versioned_key(CF_DATA, k, start_ts)).unwrap_or_default(),
+                                    deleted: false,
+                                }),
                                 2 => events.push(Event { index, key: k.clone(), value: vec![], deleted: true }),
                                 _ => {}
                             }
@@ -410,7 +433,12 @@ impl RangeSm {
                     if commit_ts > 0 {
                         if let Some(l) = percolator::get_lock(ov, k) {
                             match l.op {
-                                1 => events.push(Event { index, key: k.clone(), value: ov.get(&versioned_key(CF_DATA, k, start_ts)).unwrap_or_default(), deleted: false }),
+                                1 => events.push(Event {
+                                    index,
+                                    key: k.clone(),
+                                    value: ov.get(&versioned_key(CF_DATA, k, start_ts)).unwrap_or_default(),
+                                    deleted: false,
+                                }),
                                 2 => events.push(Event { index, key: k.clone(), value: vec![], deleted: true }),
                                 _ => {}
                             }
@@ -593,6 +621,7 @@ impl StateMachine for RangeSm {
 mod tests {
     use super::*;
     use kv_engine::{MemFs, Options};
+    use txn::percolator::MutOp;
 
     fn mk(id: u64, start: &[u8], end: &[u8]) -> (Arc<RangeSm>, mpsc::UnboundedReceiver<SplitEvent>) {
         let fs = MemFs::new();
@@ -650,7 +679,7 @@ mod tests {
         sm2.restore(11, &snap);
         assert_eq!(sm2.desc().end, b"m".to_vec());
         assert_eq!(sm2.read_raw(b"f", 0).unwrap(), b"v");
-        assert!(sm2.read_raw(b"t", 0).is_none() || sm2.desc().contains(b"t") == false);
+        assert!(sm2.read_raw(b"t", 0).is_none() || !sm2.desc().contains(b"t"));
         assert_eq!(sm2.applied_index(), 11);
     }
 

@@ -105,7 +105,20 @@ mod tests {
     use super::*;
     #[test]
     fn enc_preserves_order_and_roundtrips() {
-        let keys: Vec<Vec<u8>> = vec![vec![], vec![0], vec![0, 0], vec![0, 1], vec![1], b"a".to_vec(), b"a\0".to_vec(), b"a\0b".to_vec(), b"ab".to_vec(), b"b".to_vec(), vec![0xFF], vec![0xFF, 0xFF]];
+        let keys: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0],
+            vec![0, 0],
+            vec![0, 1],
+            vec![1],
+            b"a".to_vec(),
+            b"a\0".to_vec(),
+            b"a\0b".to_vec(),
+            b"ab".to_vec(),
+            b"b".to_vec(),
+            vec![0xFF],
+            vec![0xFF, 0xFF],
+        ];
         let mut sorted = keys.clone();
         sorted.sort();
         let mut by_enc = keys.clone();

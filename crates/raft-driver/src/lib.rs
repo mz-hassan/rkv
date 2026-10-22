@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::new_without_default)]
 //! Async runtime shell around the sans-IO `raft` crate: one tokio task per Raft
 //! group. It owns the persist-before-send contract, applies committed entries to
 //! a `StateMachine`, resolves proposals and linearizable reads, and takes snapshots.
@@ -68,7 +69,11 @@ enum Cmd {
     Propose(Vec<u8>, oneshot::Sender<Result<Vec<u8>, DriverError>>),
     /// linearizable read barrier: resolves with an index the state machine has already applied
     ReadBarrier(oneshot::Sender<Result<u64, DriverError>>),
-    Conf { voters: BTreeSet<NodeId>, learners: BTreeSet<NodeId>, resp: oneshot::Sender<Result<(), DriverError>> },
+    Conf {
+        voters: BTreeSet<NodeId>,
+        learners: BTreeSet<NodeId>,
+        resp: oneshot::Sender<Result<(), DriverError>>,
+    },
     Transfer(NodeId, oneshot::Sender<Result<(), DriverError>>),
     Status(oneshot::Sender<Status>),
     Stop,
@@ -105,7 +110,21 @@ pub struct GroupOptions {
 
 impl Default for GroupOptions {
     fn default() -> Self {
-        GroupOptions { tick_ms: 20, election_tick: 10, heartbeat_tick: 2, pre_vote: true, check_quorum: true, snapshot_threshold: 20_000, sync: true, inbox: 4096, lease_reads: false, max_uncommitted: 4096, clock_rate: Arc::new(AtomicU64::new(100)), max_msg_entries: 64, max_inflight: 32 }
+        GroupOptions {
+            tick_ms: 20,
+            election_tick: 10,
+            heartbeat_tick: 2,
+            pre_vote: true,
+            check_quorum: true,
+            snapshot_threshold: 20_000,
+            sync: true,
+            inbox: 4096,
+            lease_reads: false,
+            max_uncommitted: 4096,
+            clock_rate: Arc::new(AtomicU64::new(100)),
+            max_msg_entries: 64,
+            max_inflight: 32,
+        }
     }
 }
 
@@ -184,7 +203,19 @@ pub fn spawn_group(
     let (tx, rx) = mpsc::channel(opts.inbox);
     let last_contact_ms = Arc::new(AtomicU64::new(0));
     let handle = GroupHandle { group, tx, proposals: Arc::new(AtomicU64::new(0)), last_contact_ms: last_contact_ms.clone() };
-    let task = GroupTask { group, raft, storage, sm, transport, opts, pending: BTreeMap::new(), reads: BTreeMap::new(), read_waiters: vec![], next_ctx: 1, last_contact_ms };
+    let task = GroupTask {
+        group,
+        raft,
+        storage,
+        sm,
+        transport,
+        opts,
+        pending: BTreeMap::new(),
+        reads: BTreeMap::new(),
+        read_waiters: vec![],
+        next_ctx: 1,
+        last_contact_ms,
+    };
     tokio::spawn(task.run(rx));
     Ok(handle)
 }
@@ -328,11 +359,8 @@ impl GroupTask {
                 self.transport.send(self.group, m.clone());
             }
             if !rd.committed.is_empty() {
-                let batch: Vec<(u64, u64, Option<Vec<u8>>)> = rd
-                    .committed
-                    .iter()
-                    .map(|e| (e.index, e.term, if let EntryData::Normal(d) = &e.data { Some(d.clone()) } else { None }))
-                    .collect();
+                let batch: Vec<(u64, u64, Option<Vec<u8>>)> =
+                    rd.committed.iter().map(|e| (e.index, e.term, if let EntryData::Normal(d) = &e.data { Some(d.clone()) } else { None })).collect();
                 let results = self.sm.apply_batch(&batch);
                 for ((idx, term, _), res) in batch.iter().zip(results) {
                     if let Some(p) = self.pending.remove(idx) {

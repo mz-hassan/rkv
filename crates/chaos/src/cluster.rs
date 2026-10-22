@@ -59,7 +59,9 @@ impl Cluster {
         let bin = std::env::var("RKV_BIN_DIR").unwrap_or_else(|_| "./target/release".into());
         let _ = std::fs::remove_dir_all(root);
         std::fs::create_dir_all(root).unwrap();
-        let stores = (1..=opts.stores).map(|id| StoreProc { id, addr: format!("127.0.0.1:{}", free_port()), dir: format!("{root}/s{id}"), child: None, paused: false }).collect();
+        let stores = (1..=opts.stores)
+            .map(|id| StoreProc { id, addr: format!("127.0.0.1:{}", free_port()), dir: format!("{root}/s{id}"), child: None, paused: false })
+            .collect();
         let pds = (1..=opts.pd_nodes).map(|id| PdProc { id, addr: format!("127.0.0.1:{}", free_port()), dir: format!("{root}/pd{id}"), child: None }).collect();
         Cluster { root: root.to_string(), bin, opts, stores, pds }
     }
@@ -78,7 +80,12 @@ impl Cluster {
     pub fn start_pd(&mut self, idx: usize) {
         let peers = self.pds.iter().map(|p| format!("{}={}", p.id, p.addr)).collect::<Vec<_>>().join(",");
         let p = &self.pds[idx];
-        let child = Command::new(format!("{}/rkv-pd", self.bin)).args(["--id", &p.id.to_string(), "--addr", &p.addr, "--data", &p.dir, "--peers", &peers]).stdout(self.log(&format!("pd{}", p.id))).stderr(self.log(&format!("pd{}", p.id))).spawn().expect("spawn rkv-pd (build with cargo build --release)");
+        let child = Command::new(format!("{}/rkv-pd", self.bin))
+            .args(["--id", &p.id.to_string(), "--addr", &p.addr, "--data", &p.dir, "--peers", &peers])
+            .stdout(self.log(&format!("pd{}", p.id)))
+            .stderr(self.log(&format!("pd{}", p.id)))
+            .spawn()
+            .expect("spawn rkv-pd (build with cargo build --release)");
         self.pds[idx].child = Some(child);
     }
 
@@ -94,7 +101,8 @@ impl Cluster {
         args.extend(["--election-tick".into(), self.opts.election_tick.to_string(), "--tick-ms".into(), self.opts.tick_ms.to_string()]);
         args.extend(self.opts.extra_server_args.clone());
         let name = format!("s{}", s.id);
-        let child = Command::new(format!("{}/rkv-server", self.bin)).args(&args).stdout(self.log(&name)).stderr(self.log(&name)).spawn().expect("spawn rkv-server");
+        let child =
+            Command::new(format!("{}/rkv-server", self.bin)).args(&args).stdout(self.log(&name)).stderr(self.log(&name)).spawn().expect("spawn rkv-server");
         self.stores[idx].child = Some(child);
         self.stores[idx].paused = false;
     }
@@ -192,7 +200,11 @@ impl Cluster {
             let st = self.statuses().await;
             let up = st.iter().filter(|(_, _, r)| !r.is_empty()).count();
             let leaders = st.iter().flat_map(|(_, _, r)| r.iter()).filter(|r| r.is_leader).count();
-            let voters_ok = st.iter().flat_map(|(_, _, r)| r.iter()).filter_map(|r| r.info.as_ref()).any(|i| i.peers.iter().filter(|p| !p.learner).count() >= self.opts.stores.min(3) as usize);
+            let voters_ok = st
+                .iter()
+                .flat_map(|(_, _, r)| r.iter())
+                .filter_map(|r| r.info.as_ref())
+                .any(|i| i.peers.iter().filter(|p| !p.learner).count() >= self.opts.stores.min(3) as usize);
             if up >= self.opts.stores.min(3) as usize && leaders >= 1 && voters_ok {
                 return true;
             }
@@ -217,11 +229,16 @@ impl Drop for Cluster {
     }
 }
 
+#[allow(dead_code)] // handy when debugging a run
 pub fn summarize(st: &[(usize, u64, Vec<RangeStatus>)]) -> BTreeMap<u64, Vec<String>> {
     let mut m = BTreeMap::new();
     for (_, sid, rs) in st {
         for r in rs {
-            m.entry(r.info.as_ref().map(|i| i.id).unwrap_or(0)).or_insert_with(Vec::new).push(format!("s{sid}:{}@{}", if r.is_leader { "L" } else { "f" }, r.applied));
+            m.entry(r.info.as_ref().map(|i| i.id).unwrap_or(0)).or_insert_with(Vec::new).push(format!(
+                "s{sid}:{}@{}",
+                if r.is_leader { "L" } else { "f" },
+                r.applied
+            ));
         }
     }
     m

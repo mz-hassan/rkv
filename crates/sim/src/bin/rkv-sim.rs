@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::new_without_default)]
 //! Seed sweep runner:
 //!   rkv-sim --seeds 0..1000 --profile stormy [--duration 20000] [--jobs 8] [--out DIR] [--bug stale-reads]
 use lincheck::Verdict;
@@ -75,6 +76,7 @@ fn main() {
     });
     let out_dir = arg(&args, "--out");
     let do_min = args.iter().any(|a| a == "--minimize");
+    let save_dir = arg(&args, "--save-regressions");
     let voters: u64 = arg(&args, "--voters").map(|s| s.parse().unwrap()).unwrap_or(3);
 
     let next = Arc::new(AtomicU64::new(lo));
@@ -87,7 +89,9 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut hs = vec![];
     for _ in 0..jobs {
-        let (next, failures, totals, live_fail, inconclusive, ran, virtual_ms) = (next.clone(), failures.clone(), totals.clone(), live_fail.clone(), inconclusive.clone(), ran.clone(), virtual_ms.clone());
+        let (next, failures, totals, live_fail, inconclusive, ran, virtual_ms) =
+            (next.clone(), failures.clone(), totals.clone(), live_fail.clone(), inconclusive.clone(), ran.clone(), virtual_ms.clone());
+        let save_dir = save_dir.clone();
         hs.push(std::thread::spawn(move || loop {
             let seed = next.fetch_add(1, Ordering::SeqCst);
             if seed >= hi {
@@ -129,7 +133,17 @@ fn main() {
                 let mut desc = format!("{:?}", r.lin);
                 if do_min {
                     let m = minimize(cfg);
-                    desc = format!("{desc}; minimized to {} actions, {} ms: {:?}", m.schedule.as_ref().map(|s| s.len()).unwrap_or(0), m.duration_ms, m.schedule);
+                    desc =
+                        format!("{desc}; minimized to {} actions, {} ms: {:?}", m.schedule.as_ref().map(|s| s.len()).unwrap_or(0), m.duration_ms, m.schedule);
+                }
+                if let (Some(dir), None) = (&save_dir, bug) {
+                    let _ = std::fs::create_dir_all(dir);
+                    let j = format!(
+                        "{{\"seed\": {seed}, \"profile\": \"{}\", \"duration_ms\": {duration}, \"voters\": {voters}, \"note\": {:?}}}",
+                        profile.name(),
+                        desc.chars().take(300).collect::<String>()
+                    );
+                    let _ = std::fs::write(format!("{dir}/{}-{seed}.json", profile.name()), j);
                 }
                 failures.lock().unwrap().push((seed, r.safety_violations.clone(), desc));
             }
@@ -143,7 +157,16 @@ fn main() {
     let t = totals.lock().unwrap();
     let ran = ran.load(Ordering::Relaxed);
     let vh = virtual_ms.load(Ordering::Relaxed) as f64 / 3_600_000.0;
-    println!("profile={} seeds={}..{} ran={} failed={} liveness_failures={} lin_inconclusive={}", profile.name(), lo, hi, ran, fl.len(), live_fail.load(Ordering::Relaxed), inconclusive.load(Ordering::Relaxed));
+    println!(
+        "profile={} seeds={}..{} ran={} failed={} liveness_failures={} lin_inconclusive={}",
+        profile.name(),
+        lo,
+        hi,
+        ran,
+        fl.len(),
+        live_fail.load(Ordering::Relaxed),
+        inconclusive.load(Ordering::Relaxed)
+    );
     println!("simulated_hours={:.2} wall_s={:.1} ops={} completed={} pending={} elections={} max_term={} crashes={} snapshots_installed={} snapshots_taken={} conf_changes={} invariant_checks={} committed_entries={}",
         vh, wall, t.ops_total, t.ops_completed, t.ops_pending, t.leaders_elected, t.max_term, t.crashes, t.snapshots_installed, t.snapshots_taken, t.conf_changes, t.invariant_checks, t.committed_entries);
     for (seed, v, d) in fl.iter().take(10) {

@@ -1,9 +1,9 @@
 //! End-to-end: three stores over real gRPC on localhost, static membership (no PD).
 use kv_client::RawClient;
 use kv_server::{serve, Store, StoreConfig};
+use raft_driver::StateMachine;
 use rkv_proto::admin_client::AdminClient;
 use rkv_proto::{Empty, SplitReq};
-use raft_driver::StateMachine;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,7 +142,10 @@ async fn raw_kv_end_to_end_with_failover_and_split() {
     let mut caught_up = false;
     for _ in 0..100 {
         let reps = n1.store.all_replicas();
-        if reps.len() == 2 && reps.iter().all(|r| r.sm.applied_index() > 0) && n1.store.find(b"after29").map(|r| r.sm.read_raw(b"after29", 0).is_some()).unwrap_or(false) {
+        if reps.len() == 2
+            && reps.iter().all(|r| r.sm.applied_index() > 0)
+            && n1.store.find(b"after29").map(|r| r.sm.read_raw(b"after29", 0).is_some()).unwrap_or(false)
+        {
             caught_up = true;
             break;
         }

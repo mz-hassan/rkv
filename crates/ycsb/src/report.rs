@@ -3,12 +3,23 @@ use serde_json::{json, Value};
 use std::process::Command;
 
 fn sh(cmd: &str, args: &[&str]) -> String {
-    Command::new(cmd).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|| "unknown".into())
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".into())
 }
 
 pub fn hardware() -> Value {
-    let cpu = if cfg!(target_os = "macos") { sh("sysctl", &["-n", "machdep.cpu.brand_string"]) } else { sh("sh", &["-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"]) };
-    let mem = if cfg!(target_os = "macos") { sh("sysctl", &["-n", "hw.memsize"]) } else { sh("sh", &["-c", "grep MemTotal /proc/meminfo | awk '{print $2*1024}'"]) };
+    let cpu = if cfg!(target_os = "macos") {
+        sh("sysctl", &["-n", "machdep.cpu.brand_string"])
+    } else {
+        sh("sh", &["-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"])
+    };
+    let mem =
+        if cfg!(target_os = "macos") { sh("sysctl", &["-n", "hw.memsize"]) } else { sh("sh", &["-c", "grep MemTotal /proc/meminfo | awk '{print $2*1024}'"]) };
     json!({
         "cpu": cpu, "memory_bytes": mem, "os": sh("uname", &["-sr"]), "arch": std::env::consts::ARCH,
         "cores": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),

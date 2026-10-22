@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::new_without_default)]
 //! kv-engine: an LSM-tree storage engine with MVCC.
 pub mod bloom;
 pub mod cache;

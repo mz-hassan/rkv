@@ -31,7 +31,12 @@ async fn start_pd(dir: &str, addr: &str) -> (Proc, Arc<Pd>) {
     let rt = rt();
     let (d, a) = (dir.to_string(), addr.to_string());
     let peers: BTreeMap<u64, String> = [(1u64, a.clone())].into_iter().collect();
-    let pd = rt.spawn(async move { Pd::start(PdConfig { id: 1, addr: a, data_dir: d, peers, group: raft_driver::GroupOptions { tick_ms: 10, ..Default::default() } }).await.unwrap() }).await.unwrap();
+    let pd = rt
+        .spawn(async move {
+            Pd::start(PdConfig { id: 1, addr: a, data_dir: d, peers, group: raft_driver::GroupOptions { tick_ms: 10, ..Default::default() } }).await.unwrap()
+        })
+        .await
+        .unwrap();
     let (p2, sa) = (pd.clone(), addr.parse().unwrap());
     rt.spawn(async move {
         let _ = service::serve(p2, sa).await;
@@ -90,7 +95,10 @@ async fn pd_driven_cluster_replicates_balances_and_runs_transactions() {
     }
     {
         let (ranges, stores) = pd.all();
-        eprintln!("PD ranges: {:?}", ranges.iter().map(|r| (r.id, r.leader_store, r.peers.iter().map(|p| (p.store_id, p.learner)).collect::<Vec<_>>())).collect::<Vec<_>>());
+        eprintln!(
+            "PD ranges: {:?}",
+            ranges.iter().map(|r| (r.id, r.leader_store, r.peers.iter().map(|p| (p.store_id, p.learner)).collect::<Vec<_>>())).collect::<Vec<_>>()
+        );
         eprintln!("PD stores: {:?}", stores.iter().map(|s| (s.id, s.range_count, s.alive)).collect::<Vec<_>>());
         for (_, s) in procs.iter() {
             eprintln!("store {} replicas: {:?}", s.cfg.store_id, s.all_replicas().iter().map(|r| r.id).collect::<Vec<_>>());

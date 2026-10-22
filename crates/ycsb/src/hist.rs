@@ -62,7 +62,11 @@ impl Hist {
         self.max_us
     }
     pub fn mean_us(&self) -> f64 {
-        if self.count == 0 { 0.0 } else { self.sum_us as f64 / self.count as f64 }
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum_us as f64 / self.count as f64
+        }
     }
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({

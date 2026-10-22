@@ -3,7 +3,7 @@ use crate::cmd::Cmd;
 use crate::sm::{load_ranges, persist_range, RangeDesc, RangeSm, SplitEvent};
 use crate::transport::{AddrBook, GrpcTransport};
 use ::kv_client::PdClient;
-use kv_engine::{Db, OsFs, Options, Vfs, WriteBatch};
+use kv_engine::{Db, Options, OsFs, Vfs, WriteBatch};
 use parking_lot::{Mutex, RwLock};
 use raft::{Membership, Role};
 use raft_driver::{spawn_group, DriverError, GroupHandle, GroupOptions, Status};
@@ -98,6 +98,7 @@ fn tomb_key(range_id: u64) -> Vec<u8> {
 fn encode_set(s: &BTreeSet<u64>) -> Vec<u8> {
     s.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn decode_set(b: &[u8]) -> BTreeSet<u64> {
     b.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect()
 }
@@ -115,7 +116,23 @@ impl Store {
         let transport = GrpcTransport::new(cfg.store_id, addrs.clone());
         let (split_tx, split_rx) = mpsc::unbounded_channel();
         let pd = if cfg.pd_addrs.is_empty() { None } else { Some(Arc::new(PdClient::new(cfg.pd_addrs.clone()))) };
-        let tombs: HashSet<u64> = db.scan(&{ let mut p = vec![CF_META]; p.extend_from_slice(b"tomb/"); p }, &{ let mut p = vec![CF_META]; p.extend_from_slice(b"tomb0"); p }, 0)?.into_iter().filter_map(|(k, _)| k.get(k.len().saturating_sub(8)..).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes)).collect();
+        let tombs: HashSet<u64> = db
+            .scan(
+                &{
+                    let mut p = vec![CF_META];
+                    p.extend_from_slice(b"tomb/");
+                    p
+                },
+                &{
+                    let mut p = vec![CF_META];
+                    p.extend_from_slice(b"tomb0");
+                    p
+                },
+                0,
+            )?
+            .into_iter()
+            .filter_map(|(k, _)| k.get(k.len().saturating_sub(8)..).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes))
+            .collect();
         let store = Arc::new(Store {
             cfg: cfg.clone(),
             db: db.clone(),
@@ -173,8 +190,27 @@ impl Store {
         persist_range(&self.db, &desc)?;
         let sm = RangeSm::new(self.db.clone(), desc, self.split_tx.clone());
         let dir = format!("{}/raft/{}", self.cfg.data_dir, id);
-        let handle = spawn_group(id, self.cfg.store_id, Membership::new(voters.clone()), self.fs.clone(), &dir, sm.clone(), self.transport.clone(), self.cfg.group.clone())?;
-        let rep = Arc::new(Replica { id, handle, sm, reads: AtomicU64::new(0), last_writes: AtomicU64::new(0), last_reads: AtomicU64::new(0), conf_ver: AtomicU64::new(1), last_members: Mutex::new(voters.clone()), was_member: std::sync::atomic::AtomicBool::new(voters.contains(&self.cfg.store_id)) });
+        let handle = spawn_group(
+            id,
+            self.cfg.store_id,
+            Membership::new(voters.clone()),
+            self.fs.clone(),
+            &dir,
+            sm.clone(),
+            self.transport.clone(),
+            self.cfg.group.clone(),
+        )?;
+        let rep = Arc::new(Replica {
+            id,
+            handle,
+            sm,
+            reads: AtomicU64::new(0),
+            last_writes: AtomicU64::new(0),
+            last_reads: AtomicU64::new(0),
+            conf_ver: AtomicU64::new(1),
+            last_members: Mutex::new(voters.clone()),
+            was_member: std::sync::atomic::AtomicBool::new(voters.contains(&self.cfg.store_id)),
+        });
         self.replicas.write().insert(id, rep.clone());
         Ok(rep)
     }
@@ -379,11 +415,11 @@ impl Store {
                     let _ = self.split_range(&rep, None).await;
                 }
                 // TTL sweep every ~5s
-                if tick % 10 == 0 {
+                if tick.is_multiple_of(10) {
                     let _ = self.propose(&rep, Cmd::SweepExpired { now_ms: now_ms(), limit: 1000 }).await;
                 }
                 // MVCC garbage collection every ~60s when PD supplies the clock
-                if tick % 120 == 0 {
+                if tick.is_multiple_of(120) {
                     if let Some(pd) = &self.pd {
                         if let Ok(ts) = pd.tso_fresh().await {
                             let safe = ts.saturating_sub((600_000u64) << txn::percolator::LOGICAL_BITS); // keep 10 minutes
@@ -401,7 +437,14 @@ impl Store {
         self.tombstones.lock().insert(rep.id);
         let d = rep.sm.desc();
         let mut wb = WriteBatch::new();
-        wb.put(&{ let mut k = tomb_key(rep.id); k.truncate(k.len()); k }, b"1");
+        wb.put(
+            &{
+                let mut k = tomb_key(rep.id);
+                k.truncate(k.len());
+                k
+            },
+            b"1",
+        );
         for cf in RANGE_CFS {
             let (s, e) = cf_range(cf, &d.start, &d.end);
             for (k, _) in self.db.scan(&s, &e, 0).unwrap_or_default() {
@@ -417,7 +460,7 @@ impl Store {
     pub async fn alloc_range_id(&self) -> Result<u64, String> {
         match &self.pd {
             Some(pd) => pd.alloc_id(1).await,
-            None => Ok((self.cfg.store_id << 40) | self.next_local_id.fetch_add(1, Ordering::SeqCst) + 1000),
+            None => Ok((self.cfg.store_id << 40) | (self.next_local_id.fetch_add(1, Ordering::SeqCst) + 1000)),
         }
     }
 
@@ -457,9 +500,26 @@ impl Store {
                 if is_leader {
                     leaders += 1;
                 }
-                reports.push(RangeReport { info: Some(info), term: st.term, approx_bytes: ab, write_qps: wq, read_qps: rq, is_leader, applied: st.applied, commit: st.commit });
+                reports.push(RangeReport {
+                    info: Some(info),
+                    term: st.term,
+                    approx_bytes: ab,
+                    write_qps: wq,
+                    read_qps: rq,
+                    is_leader,
+                    applied: st.applied,
+                    commit: st.commit,
+                });
             }
-            let store = StoreInfo { id: self.cfg.store_id, addr: self.cfg.addr.clone(), range_count: reports.len() as u64, leader_count: leaders, bytes, last_seen_ms: now_ms(), alive: true };
+            let store = StoreInfo {
+                id: self.cfg.store_id,
+                addr: self.cfg.addr.clone(),
+                range_count: reports.len() as u64,
+                leader_count: leaders,
+                bytes,
+                last_seen_ms: now_ms(),
+                alive: true,
+            };
             if !bootstrapped && reports.is_empty() {
                 // first store of a fresh cluster creates range 1
                 if let Ok(r) = pd.bootstrap(store.clone()).await {

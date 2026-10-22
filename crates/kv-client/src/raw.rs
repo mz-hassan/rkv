@@ -16,7 +16,9 @@ pub enum ReadConsistency {
     Linearizable,
     Lease,
     /// served by any replica whose last contact with the leader is within the bound
-    Stale { max_staleness_ms: u64 },
+    Stale {
+        max_staleness_ms: u64,
+    },
 }
 
 impl ReadConsistency {
@@ -53,10 +55,13 @@ impl RawClient {
     pub async fn get_with(&self, key: &[u8], rc: ReadConsistency) -> Result<Option<Vec<u8>>, ClientError> {
         let (mode, stale) = rc.parts();
         let k = key.to_vec();
-        let r = self.router.exec(key, mode, stale, |mut c, ctx| {
-            let req = GetReq { ctx: Some(ctx), key: k.clone() };
-            async move { c.get(req).await }
-        }).await?;
+        let r = self
+            .router
+            .exec(key, mode, stale, |mut c, ctx| {
+                let req = GetReq { ctx: Some(ctx), key: k.clone() };
+                async move { c.get(req).await }
+            })
+            .await?;
         Ok(if r.found { Some(r.value) } else { None })
     }
 
@@ -67,20 +72,24 @@ impl RawClient {
     pub async fn put_ttl(&self, key: &[u8], value: &[u8], ttl_ms: u64) -> Result<(), ClientError> {
         let (cid, seq) = (self.client_id, self.next_seq());
         let (k, v) = (key.to_vec(), value.to_vec());
-        self.router.exec(key, 0, 0, |mut c, ctx| {
-            let req = PutReq { ctx: Some(ctx), key: k.clone(), value: v.clone(), client_id: cid, seq, ttl_ms };
-            async move { c.put(req).await }
-        }).await?;
+        self.router
+            .exec(key, 0, 0, |mut c, ctx| {
+                let req = PutReq { ctx: Some(ctx), key: k.clone(), value: v.clone(), client_id: cid, seq, ttl_ms };
+                async move { c.put(req).await }
+            })
+            .await?;
         Ok(())
     }
 
     pub async fn delete(&self, key: &[u8]) -> Result<(), ClientError> {
         let (cid, seq) = (self.client_id, self.next_seq());
         let k = key.to_vec();
-        self.router.exec(key, 0, 0, |mut c, ctx| {
-            let req = DeleteReq { ctx: Some(ctx), key: k.clone(), client_id: cid, seq };
-            async move { c.delete(req).await }
-        }).await?;
+        self.router
+            .exec(key, 0, 0, |mut c, ctx| {
+                let req = DeleteReq { ctx: Some(ctx), key: k.clone(), client_id: cid, seq };
+                async move { c.delete(req).await }
+            })
+            .await?;
         Ok(())
     }
 
@@ -88,10 +97,21 @@ impl RawClient {
     pub async fn cas(&self, key: &[u8], expect: Option<&[u8]>, new: &[u8]) -> Result<bool, ClientError> {
         let (cid, seq) = (self.client_id, self.next_seq());
         let (k, n, e) = (key.to_vec(), new.to_vec(), expect.map(|e| e.to_vec()));
-        let r = self.router.exec(key, 0, 0, |mut c, ctx| {
-            let req = CasReq { ctx: Some(ctx), key: k.clone(), has_expect: e.is_some(), expect: e.clone().unwrap_or_default(), new_value: n.clone(), client_id: cid, seq };
-            async move { c.cas(req).await }
-        }).await?;
+        let r = self
+            .router
+            .exec(key, 0, 0, |mut c, ctx| {
+                let req = CasReq {
+                    ctx: Some(ctx),
+                    key: k.clone(),
+                    has_expect: e.is_some(),
+                    expect: e.clone().unwrap_or_default(),
+                    new_value: n.clone(),
+                    client_id: cid,
+                    seq,
+                };
+                async move { c.cas(req).await }
+            })
+            .await?;
         Ok(r.success)
     }
 
@@ -103,10 +123,13 @@ impl RawClient {
             let info = self.router.locate(&cur).await?;
             let (s, e) = (cur.clone(), end.to_vec());
             let remaining = if limit == 0 { 0 } else { (limit - out.len()) as u32 };
-            let r = self.router.exec(&cur, 0, 0, |mut c, ctx| {
-                let req = ScanReq { ctx: Some(ctx), start: s.clone(), end: e.clone(), limit: remaining };
-                async move { c.scan(req).await }
-            }).await?;
+            let r = self
+                .router
+                .exec(&cur, 0, 0, |mut c, ctx| {
+                    let req = ScanReq { ctx: Some(ctx), start: s.clone(), end: e.clone(), limit: remaining };
+                    async move { c.scan(req).await }
+                })
+                .await?;
             out.extend(r.pairs.into_iter().map(|p| (p.key, p.value)));
             if limit > 0 && out.len() >= limit {
                 out.truncate(limit);

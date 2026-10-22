@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 //! rkv-chaos: Jepsen-style fault injection against REAL rkv-server/rkv-pd processes on localhost.
 //!   rkv-chaos register  --nemesis kill-leader|pause|partition-half|ring|skew|skew-lease|rolling|mixed [--secs 30 --clients 8 --keys 4 --seed 1 --stores 3]
 //!   rkv-chaos bank      [--secs 30 --accounts 20 --clients 8 --seed 1 --pd-nodes 1]       (transactions + faults, conservation audits)
@@ -141,7 +142,10 @@ async fn run_register(a: &Args) -> i32 {
         extra.push("--lease-reads".to_string());
     }
     let root = a.s("--root", &format!("/tmp/rkv-chaos-{}-{}", nem, std::process::id()));
-    let mut c = Cluster::new(&root, ClusterOpts { stores, extra_server_args: extra, election_tick: a.u("--election-tick", 10), tick_ms: a.u("--tick-ms", 20), ..Default::default() });
+    let mut c = Cluster::new(
+        &root,
+        ClusterOpts { stores, extra_server_args: extra, election_tick: a.u("--election-tick", 10), tick_ms: a.u("--tick-ms", 20), ..Default::default() },
+    );
     c.start_all().await;
     if !c.wait_ready(30).await {
         eprintln!("cluster did not become ready; logs in {root}");
@@ -277,7 +281,8 @@ async fn run_bank(a: &Args) -> i32 {
     let seed = a.u("--seed", 1);
     let nem = a.s("--nemesis", "mixed");
     let root = a.s("--root", &format!("/tmp/rkv-chaos-bank-{}", std::process::id()));
-    let mut c = Cluster::new(&root, ClusterOpts { stores: a.u("--stores", 3), pd_nodes: a.u("--pd-nodes", 1), election_tick: 10, tick_ms: 20, ..Default::default() });
+    let mut c =
+        Cluster::new(&root, ClusterOpts { stores: a.u("--stores", 3), pd_nodes: a.u("--pd-nodes", 1), election_tick: 10, tick_ms: 20, ..Default::default() });
     c.start_all().await;
     if !c.wait_ready(60).await {
         eprintln!("cluster did not become ready; logs in {root}");
@@ -299,7 +304,8 @@ async fn run_bank(a: &Args) -> i32 {
     let stop = Arc::new(AtomicBool::new(false));
     let counts = FaultCounts::default();
     let nem_task = tokio::spawn(nemesis(cl.clone(), nem.clone(), stop.clone(), seed, counts.clone()));
-    let (commits, errs, bad_audits, audits) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (commits, errs, bad_audits, audits) =
+        (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let mut hs = vec![];
     for ci in 0..nclients {
         let (tc, stop, commits, errs, bad, audits) = (tc.clone(), stop.clone(), commits.clone(), errs.clone(), bad_audits.clone(), audits.clone());
@@ -451,7 +457,8 @@ async fn run_failover(a: &Args) -> i32 {
         // client-observed unavailability: first successful write after the fault
         let mut window = None;
         while t0.elapsed() < Duration::from_secs(30) {
-            if tokio::time::timeout(Duration::from_millis(1500), client.put(b"probe", format!("t{trial}").as_bytes())).await.map(|r| r.is_ok()).unwrap_or(false) {
+            if tokio::time::timeout(Duration::from_millis(1500), client.put(b"probe", format!("t{trial}").as_bytes())).await.map(|r| r.is_ok()).unwrap_or(false)
+            {
                 window = Some(t0.elapsed());
                 break;
             }
@@ -473,7 +480,8 @@ async fn run_failover(a: &Args) -> i32 {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     raw_ms.sort();
-    let pct = |p: f64| raw_ms.get(((raw_ms.len() as f64 * p / 100.0).ceil() as usize).saturating_sub(1).min(raw_ms.len().saturating_sub(1))).copied().unwrap_or(0);
+    let pct =
+        |p: f64| raw_ms.get(((raw_ms.len() as f64 * p / 100.0).ceil() as usize).saturating_sub(1).min(raw_ms.len().saturating_sub(1))).copied().unwrap_or(0);
     let body = json!({
         "bench": "failover-window",
         "config": { "fault": fault, "trials": trials, "election_tick": et, "tick_ms": tm, "election_timeout_ms_range": [et * tm, 2 * et * tm], "prevote": !a.flag("--no-prevote"), "check_quorum": !a.flag("--no-check-quorum"), "stores": a.u("--stores", 3) },

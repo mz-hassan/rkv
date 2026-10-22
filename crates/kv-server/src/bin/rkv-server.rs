@@ -1,7 +1,7 @@
 //! rkv-server --id 1 --addr 127.0.0.1:20160 --data ./data/1 --peers 1=127.0.0.1:20160,2=...,3=... [--pd host:port,...]
 //!            [--advertise HOST:PORT] [--http 127.0.0.1:20180] [--fsync always|group|interval|never] [--strict-fsync] [--split-bytes N]
-use kv_server::{http, serve, Store, StoreConfig};
 use kv_engine::SyncPolicy;
+use kv_server::{http, serve, Store, StoreConfig};
 use std::collections::BTreeMap;
 
 fn arg(a: &[String], n: &str) -> Option<String> {

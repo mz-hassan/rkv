@@ -42,7 +42,14 @@ pub struct GrpcTransport {
 
 impl GrpcTransport {
     pub fn new(self_store: u64, addrs: AddrBook) -> Arc<GrpcTransport> {
-        Arc::new(GrpcTransport { self_store, addrs, senders: Mutex::new(HashMap::new()), dropped: Arc::new(AtomicU64::new(0)), sent: Arc::new(AtomicU64::new(0)), faults: Arc::new(Faults::default()) })
+        Arc::new(GrpcTransport {
+            self_store,
+            addrs,
+            senders: Mutex::new(HashMap::new()),
+            dropped: Arc::new(AtomicU64::new(0)),
+            sent: Arc::new(AtomicU64::new(0)),
+            faults: Arc::new(Faults::default()),
+        })
     }
 
     fn sender(&self, to: u64) -> Option<mpsc::Sender<RaftMsg>> {
@@ -75,7 +82,11 @@ impl GrpcTransport {
                     }
                 }
                 if client.is_none() {
-                    let ep = Endpoint::from_shared(format!("http://{cur_addr}")).unwrap().connect_timeout(Duration::from_millis(500)).timeout(Duration::from_secs(2)).tcp_nodelay(true);
+                    let ep = Endpoint::from_shared(format!("http://{cur_addr}"))
+                        .unwrap()
+                        .connect_timeout(Duration::from_millis(500))
+                        .timeout(Duration::from_secs(2))
+                        .tcp_nodelay(true);
                     client = Some(RaftTransportClient::new(ep.connect_lazy()).max_decoding_message_size(256 << 20).max_encoding_message_size(256 << 20));
                 }
                 let d = faults.delay_ms.load(Ordering::Relaxed);

@@ -1,8 +1,9 @@
+#![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 //! Placement driver: replicated cluster metadata (bootstrap, ids, TSO window, config) over
 //! its own Raft group, plus leader-local routing table and scheduler.
 use ::kv_client::now_ms;
-use kv_engine::{OsFs, Vfs};
 use ::kv_server::transport::{AddrBook, GrpcTransport};
+use kv_engine::{OsFs, Vfs};
 use parking_lot::{Mutex, RwLock};
 use raft::codec::{R, W};
 use raft::{Membership, Role};
@@ -238,7 +239,16 @@ impl Pd {
         let transport = GrpcTransport::new(cfg.id, addrs.clone());
         let sm = PdSm::new();
         let fs: Arc<dyn Vfs> = OsFs::new_arc(false);
-        let handle = spawn_group(0, cfg.id, Membership::new(cfg.peers.keys().copied()), fs, &format!("{}/raft", cfg.data_dir), sm.clone(), transport.clone(), cfg.group.clone())?;
+        let handle = spawn_group(
+            0,
+            cfg.id,
+            Membership::new(cfg.peers.keys().copied()),
+            fs,
+            &format!("{}/raft", cfg.data_dir),
+            sm.clone(),
+            transport.clone(),
+            cfg.group.clone(),
+        )?;
         let pd = Arc::new(Pd {
             id: cfg.id,
             addr: cfg.addr,
@@ -276,7 +286,12 @@ impl Pd {
     async fn propose(&self, c: PdCmd) -> Result<Vec<u8>, Error> {
         match tokio::time::timeout(Duration::from_secs(3), self.handle.propose(c.encode())).await {
             Err(_) => Err(perr(5, "pd proposal timed out")),
-            Ok(Err(DriverError::NotLeader(l))) => Err(Error { code: 1, msg: "pd not leader".into(), leader: l.map(|l| Peer { store_id: l, addr: self.addrs.read().get(&l).cloned().unwrap_or_default(), learner: false }), ranges: vec![] }),
+            Ok(Err(DriverError::NotLeader(l))) => Err(Error {
+                code: 1,
+                msg: "pd not leader".into(),
+                leader: l.map(|l| Peer { store_id: l, addr: self.addrs.read().get(&l).cloned().unwrap_or_default(), learner: false }),
+                ranges: vec![],
+            }),
             Ok(Err(e)) => Err(perr(6, &format!("{e:?}"))),
             Ok(Ok(r)) => Ok(r),
         }
@@ -353,7 +368,15 @@ impl Pd {
         let mut m = self.mem.lock();
         m.term = term;
         if first {
-            let info = RangeInfo { id: 1, start: vec![], end: vec![], version: 1, conf_ver: 1, peers: vec![Peer { store_id: store.id, addr: store.addr.clone(), learner: false }], leader_store: store.id };
+            let info = RangeInfo {
+                id: 1,
+                start: vec![],
+                end: vec![],
+                version: 1,
+                conf_ver: 1,
+                peers: vec![Peer { store_id: store.id, addr: store.addr.clone(), learner: false }],
+                leader_store: store.id,
+            };
             m.ranges.insert(vec![], RangeEntry { info: info.clone(), term: 0, bytes: 0, write_qps: 0, read_qps: 0, commit: 0, updated_ms: now_ms() });
             return Ok(Some(info));
         }
@@ -380,12 +403,28 @@ impl Pd {
                     None => true,
                 };
                 if accept {
-                    let stale: Vec<Vec<u8>> = m.ranges.iter().filter(|(_, e)| e.info.id != info.id && overlaps(&e.info, &info) && e.info.version <= info.version).map(|(k, _)| k.clone()).collect();
+                    let stale: Vec<Vec<u8>> = m
+                        .ranges
+                        .iter()
+                        .filter(|(_, e)| e.info.id != info.id && overlaps(&e.info, &info) && e.info.version <= info.version)
+                        .map(|(k, _)| k.clone())
+                        .collect();
                     for k in stale {
                         m.ranges.remove(&k);
                     }
                     m.ranges.retain(|_, e| e.info.id != info.id);
-                    m.ranges.insert(info.start.clone(), RangeEntry { info, term: rr.term, bytes: rr.approx_bytes, write_qps: rr.write_qps, read_qps: rr.read_qps, commit: rr.commit, updated_ms: now });
+                    m.ranges.insert(
+                        info.start.clone(),
+                        RangeEntry {
+                            info,
+                            term: rr.term,
+                            bytes: rr.approx_bytes,
+                            write_qps: rr.write_qps,
+                            read_qps: rr.read_qps,
+                            commit: rr.commit,
+                            updated_ms: now,
+                        },
+                    );
                 }
             }
         }
@@ -444,7 +483,11 @@ impl Pd {
 
     pub fn route(&self, key: &[u8]) -> Option<RangeInfo> {
         let m = self.mem.lock();
-        m.ranges.range(..=key.to_vec()).next_back().filter(|(_, e)| key >= e.info.start.as_slice() && (e.info.end.is_empty() || key < e.info.end.as_slice())).map(|(_, e)| e.info.clone())
+        m.ranges
+            .range(..=key.to_vec())
+            .next_back()
+            .filter(|(_, e)| key >= e.info.start.as_slice() && (e.info.end.is_empty() || key < e.info.end.as_slice()))
+            .map(|(_, e)| e.info.clone())
     }
     pub fn route_by_id(&self, id: u64) -> Option<RangeInfo> {
         self.mem.lock().ranges.values().find(|e| e.info.id == id).map(|e| e.info.clone())
@@ -452,7 +495,10 @@ impl Pd {
     pub fn all(&self) -> (Vec<RangeInfo>, Vec<StoreInfo>) {
         let m = self.mem.lock();
         let now = now_ms();
-        (m.ranges.values().map(|e| e.info.clone()).collect(), m.stores.values().map(|s| StoreInfo { alive: now.saturating_sub(s.last_seen_ms) < STORE_DEAD_MS, ..s.info.clone() }).collect())
+        (
+            m.ranges.values().map(|e| e.info.clone()).collect(),
+            m.stores.values().map(|s| StoreInfo { alive: now.saturating_sub(s.last_seen_ms) < STORE_DEAD_MS, ..s.info.clone() }).collect(),
+        )
     }
     pub async fn leader_check(&self) -> Result<(), Error> {
         self.ensure_leader().await.map(|_| ())
@@ -484,9 +530,11 @@ impl Pd {
         {
             // an operation is finished as soon as the range's membership or version changed
             let sigs: HashMap<u64, (Vec<(u64, bool)>, u64)> = m.ranges.values().map(|e| (e.info.id, (peer_sig(&e.info), e.info.version))).collect();
-            m.pending.retain(|rid, (_, since, sig, ver)| now.saturating_sub(*since) < 20_000 && sigs.get(rid).map(|(s, v)| s == sig && v == ver).unwrap_or(true));
+            m.pending
+                .retain(|rid, (_, since, sig, ver)| now.saturating_sub(*since) < 20_000 && sigs.get(rid).map(|(s, v)| s == sig && v == ver).unwrap_or(true));
         }
-        let alive: Vec<u64> = m.stores.iter().filter(|(id, s)| now.saturating_sub(s.last_seen_ms) < STORE_DEAD_MS && **id != evict).map(|(id, _)| *id).collect();
+        let alive: Vec<u64> =
+            m.stores.iter().filter(|(id, s)| now.saturating_sub(s.last_seen_ms) < STORE_DEAD_MS && **id != evict).map(|(id, _)| *id).collect();
         let is_alive = |id: u64| alive.contains(&id);
         // replica counts per store (from the routing table)
         let mut counts: HashMap<u64, usize> = alive.iter().map(|s| (*s, 0)).collect();
@@ -534,7 +582,9 @@ impl Pd {
             }
             // 2. too few live replicas: add one on the least loaded store that doesn't have the range
             if alive_voters < replication {
-                if let Some(target) = alive.iter().filter(|s| !e.info.peers.iter().any(|p| p.store_id == **s)).min_by_key(|s| counts.get(s).copied().unwrap_or(0)) {
+                if let Some(target) =
+                    alive.iter().filter(|s| !e.info.peers.iter().any(|p| p.store_id == **s)).min_by_key(|s| counts.get(s).copied().unwrap_or(0))
+                {
                     new_cmds.push(cmd(1, *target, vec![]));
                     new_pending.push((rid, 1));
                     *counts.entry(*target).or_default() += 1;
@@ -543,7 +593,11 @@ impl Pd {
             }
             // 3. too many replicas (or dead ones once enough are alive): remove
             if voters.len() > replication || (alive_voters >= replication && voters.len() > alive_voters) {
-                let victim = voters.iter().filter(|p| p.store_id != leader).max_by_key(|p| (!is_alive(p.store_id), counts.get(&p.store_id).copied().unwrap_or(0))).map(|p| p.store_id);
+                let victim = voters
+                    .iter()
+                    .filter(|p| p.store_id != leader)
+                    .max_by_key(|p| (!is_alive(p.store_id), counts.get(&p.store_id).copied().unwrap_or(0)))
+                    .map(|p| p.store_id);
                 if let Some(v) = victim {
                     new_cmds.push(cmd(3, v, vec![]));
                     new_pending.push((rid, 3));
@@ -563,7 +617,12 @@ impl Pd {
             let (mins, minn) = counts.iter().min_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap();
             if maxn >= minn + 2 {
                 if let Some(e) = entries.iter().find(|e| {
-                    !m.pending.contains_key(&e.info.id) && !new_pending.iter().any(|(r, _)| *r == e.info.id) && e.info.peers.iter().any(|p| p.store_id == maxs) && !e.info.peers.iter().any(|p| p.store_id == mins) && e.info.leader_store != 0 && e.info.peers.iter().all(|p| !p.learner)
+                    !m.pending.contains_key(&e.info.id)
+                        && !new_pending.iter().any(|(r, _)| *r == e.info.id)
+                        && e.info.peers.iter().any(|p| p.store_id == maxs)
+                        && !e.info.peers.iter().any(|p| p.store_id == mins)
+                        && e.info.leader_store != 0
+                        && e.info.peers.iter().all(|p| !p.learner)
                 }) {
                     new_cmds.push((e.info.leader_store, PdCommand { kind: 1, range_id: e.info.id, store_id: mins, split_key: vec![] }));
                     new_pending.push((e.info.id, 1));
@@ -575,7 +634,12 @@ impl Pd {
             let (maxs, maxl) = leaders.iter().filter(|(s, _)| is_alive(**s)).max_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap_or((0, 0));
             let (mins, minl) = leaders.iter().filter(|(s, _)| is_alive(**s)).min_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap_or((0, 0));
             if maxl >= minl + 2 {
-                if let Some(e) = entries.iter().find(|e| e.info.leader_store == maxs && !m.pending.contains_key(&e.info.id) && !new_pending.iter().any(|(r, _)| *r == e.info.id) && e.info.peers.iter().any(|p| p.store_id == mins && !p.learner)) {
+                if let Some(e) = entries.iter().find(|e| {
+                    e.info.leader_store == maxs
+                        && !m.pending.contains_key(&e.info.id)
+                        && !new_pending.iter().any(|(r, _)| *r == e.info.id)
+                        && e.info.peers.iter().any(|p| p.store_id == mins && !p.learner)
+                }) {
                     new_cmds.push((maxs, PdCommand { kind: 4, range_id: e.info.id, store_id: mins, split_key: vec![] }));
                     new_pending.push((e.info.id, 4));
                 }

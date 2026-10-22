@@ -75,7 +75,13 @@ pub struct OpGen {
 
 impl OpGen {
     pub fn new(w: Workload, records: u64, theta: f64, value_size: usize) -> OpGen {
-        OpGen { zipf: Zipf::new(records.max(2), if w.dist == Dist::Uniform { 0.0 } else { theta }), w, inserted: Arc::new(AtomicU64::new(records)), value_size, records }
+        OpGen {
+            zipf: Zipf::new(records.max(2), if w.dist == Dist::Uniform { 0.0 } else { theta }),
+            w,
+            inserted: Arc::new(AtomicU64::new(records)),
+            value_size,
+            records,
+        }
     }
 
     fn pick<R: Rng>(&self, rng: &mut R) -> u64 {

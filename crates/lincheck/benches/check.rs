@@ -12,7 +12,15 @@ fn history(n: usize) -> Vec<Op> {
             cur = Some(v.clone());
             ops.push(Op { id: i as u64, client: 0, key: b"k".to_vec(), kind: OpKind::Write(v), invoke: t, ret: Some(t + 12), result: Some(OpResult::WriteOk) });
         } else {
-            ops.push(Op { id: i as u64, client: 1, key: b"k".to_vec(), kind: OpKind::Read, invoke: t + 1, ret: Some(t + 6), result: Some(OpResult::ReadOk(cur.clone())) });
+            ops.push(Op {
+                id: i as u64,
+                client: 1,
+                key: b"k".to_vec(),
+                kind: OpKind::Read,
+                invoke: t + 1,
+                ret: Some(t + 6),
+                result: Some(OpResult::ReadOk(cur.clone())),
+            });
         }
     }
     ops

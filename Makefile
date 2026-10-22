@@ -58,7 +58,7 @@ chaos: build ## real-process chaos: kill -9 / pause / partition / ring / skew + 
 	SCALE=$(SCALE) bash bench/scripts/r3.sh
 
 dry-run: ## print every command of every benchmark script without running anything
-	@for s in sim s1 s2 r1 r2 r3 d1 d2 k1 etcd_baseline fuzz; do DRY_RUN=1 SCALE=smoke bash bench/scripts/$$s.sh >/dev/null && echo "dry-run ok: $$s" || echo "dry-run FAILED: $$s"; done
+	@for s in sim s1 s2 r1 r2 r3 d1 d2 k1 n1 etcd_baseline fuzz; do DRY_RUN=1 SCALE=smoke bash bench/scripts/$$s.sh >/dev/null && echo "dry-run ok: $$s" || echo "dry-run FAILED: $$s"; done
 
 cluster-up: build ## local 3-store cluster with a PD (see scripts/cluster.sh)
 	scripts/cluster.sh up 3 pd

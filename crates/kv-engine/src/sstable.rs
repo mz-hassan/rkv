@@ -316,6 +316,13 @@ impl Iterator for SstIter {
     }
 }
 
+impl SstBuilder {
+    /// Bytes written so far plus the pending block (for output-file rolling).
+    pub fn offset_bytes(&self) -> u64 {
+        self.offset + self.cur.len() as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,12 +389,5 @@ mod tests {
         let it = r.iter(b"", b"");
         let n = it.count();
         assert!(n < 100);
-    }
-}
-
-impl SstBuilder {
-    /// Bytes written so far plus the pending block (for output-file rolling).
-    pub fn offset_bytes(&self) -> u64 {
-        self.offset + self.cur.len() as u64
     }
 }

@@ -31,12 +31,17 @@ pub async fn serve(store: Arc<Store>, addr: String) {
                             }
                         }
                     }
-                    if ready { ("200 OK", "ready\n".to_string()) } else { ("503 Service Unavailable", "no leader known\n".to_string()) }
+                    if ready {
+                        ("200 OK", "ready\n".to_string())
+                    } else {
+                        ("503 Service Unavailable", "no leader known\n".to_string())
+                    }
                 }
                 "/metrics" => ("200 OK", metrics(&store).await),
                 _ => ("404 Not Found", "not found\n".to_string()),
             };
-            let resp = format!("HTTP/1.1 {code}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let resp =
+                format!("HTTP/1.1 {code}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             let _ = sock.write_all(resp.as_bytes()).await;
         });
     }
@@ -48,7 +53,11 @@ async fn metrics(s: &Store) -> String {
     let _ = writeln!(o, "# TYPE rkv_requests_total counter\nrkv_requests_total{{store=\"{sid}\"}} {}", s.metrics.requests.load(Ordering::Relaxed));
     let _ = writeln!(o, "# TYPE rkv_proposals_total counter\nrkv_proposals_total{{store=\"{sid}\"}} {}", s.metrics.proposals.load(Ordering::Relaxed));
     let _ = writeln!(o, "# TYPE rkv_raft_msgs_sent_total counter\nrkv_raft_msgs_sent_total{{store=\"{sid}\"}} {}", s.transport.sent.load(Ordering::Relaxed));
-    let _ = writeln!(o, "# TYPE rkv_raft_msgs_dropped_total counter\nrkv_raft_msgs_dropped_total{{store=\"{sid}\"}} {}", s.transport.dropped.load(Ordering::Relaxed));
+    let _ = writeln!(
+        o,
+        "# TYPE rkv_raft_msgs_dropped_total counter\nrkv_raft_msgs_dropped_total{{store=\"{sid}\"}} {}",
+        s.transport.dropped.load(Ordering::Relaxed)
+    );
     let m = s.db.metrics();
     let g = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
     let _ = writeln!(o, "rkv_engine_user_bytes_total{{store=\"{sid}\"}} {}", g(&m.user_bytes));

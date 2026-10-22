@@ -67,7 +67,11 @@ impl BlockCache {
     pub fn hit_ratio(&self) -> f64 {
         let h = self.hits.load(Ordering::Relaxed) as f64;
         let m = self.misses.load(Ordering::Relaxed) as f64;
-        if h + m == 0.0 { 0.0 } else { h / (h + m) }
+        if h + m == 0.0 {
+            0.0
+        } else {
+            h / (h + m)
+        }
     }
 }
 

@@ -48,6 +48,7 @@ impl Memtable {
         self.len() == 0
     }
 
+    #[allow(clippy::needless_range_loop)] // levels index several parallel arrays
     pub fn insert(&self, e: Entry) {
         self.size.fetch_add(e.ikey.len() + e.value.len() + 48, AO::Relaxed);
         let mut l = self.l.write();
@@ -99,7 +100,11 @@ impl Memtable {
                 }
             }
         }
-        if cur == NIL { l.head[0] } else { l.nodes[cur as usize].next[0] }
+        if cur == NIL {
+            l.head[0]
+        } else {
+            l.nodes[cur as usize].next[0]
+        }
     }
 
     /// Newest version of `uk` with ts <= `ts`.

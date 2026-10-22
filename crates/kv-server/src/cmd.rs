@@ -31,7 +31,11 @@ pub enum Resp {
     Ok,
     Cas(bool),
     KeyErrors(Vec<KeyError>),
-    TxnStatus { action: u32, commit_ts: u64, ttl_ms: u64 },
+    TxnStatus {
+        action: u32,
+        commit_ts: u64,
+        ttl_ms: u64,
+    },
     /// key not (or no longer) in this range: the client must refresh its route
     RangeMoved,
     Failed(String),
@@ -281,7 +285,13 @@ mod tests {
         let cmds = vec![
             Cmd::RawPut { key: b"k".to_vec(), value: b"v".to_vec(), expire_ms: 5, client: 1, seq: 2 },
             Cmd::RawCas { key: b"k".to_vec(), expect: None, new: b"n".to_vec(), client: 1, seq: 3 },
-            Cmd::Prewrite { muts: vec![Mut { op: MutOp::Put, key: b"a".to_vec(), value: b"1".to_vec() }], primary: b"a".to_vec(), start_ts: 9, ttl_ms: 3000, read_keys: vec![b"r".to_vec()] },
+            Cmd::Prewrite {
+                muts: vec![Mut { op: MutOp::Put, key: b"a".to_vec(), value: b"1".to_vec() }],
+                primary: b"a".to_vec(),
+                start_ts: 9,
+                ttl_ms: 3000,
+                read_keys: vec![b"r".to_vec()],
+            },
             Cmd::Commit { keys: vec![b"a".to_vec(), b"b".to_vec()], start_ts: 9, commit_ts: 10 },
             Cmd::Split { split_key: b"m".to_vec(), new_range_id: 77 },
             Cmd::Gc { safe_point: 5, limit: 100 },

@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 pub mod cmd;
 pub mod http;
 pub mod service;

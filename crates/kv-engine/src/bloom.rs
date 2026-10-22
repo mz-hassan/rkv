@@ -16,7 +16,7 @@ fn hash64(data: &[u8]) -> u64 {
 }
 
 impl Bloom {
-    /// Build a filter for `keys`. Layout: bits ++ [k:1]. 
+    /// Build a filter for `keys`. Layout: bits ++ [k:1].
     pub fn build(keys: &[Vec<u8>], bits_per_key: usize) -> Vec<u8> {
         let nbits = (keys.len() * bits_per_key).max(64);
         let nbytes = nbits.div_ceil(8);

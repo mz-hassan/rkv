@@ -155,7 +155,8 @@ impl Kv for KvSvc {
 
     async fn cas(&self, req: Request<CasReq>) -> Res<CasResp> {
         let r = req.into_inner();
-        let cmd = Cmd::RawCas { key: r.key.clone(), expect: if r.has_expect { Some(r.expect) } else { None }, new: r.new_value, client: r.client_id, seq: r.seq };
+        let cmd =
+            Cmd::RawCas { key: r.key.clone(), expect: if r.has_expect { Some(r.expect) } else { None }, new: r.new_value, client: r.client_id, seq: r.seq };
         Ok(Response::new(match self.0.write(&r.ctx, &r.key, cmd).await {
             Ok(Resp::Cas(b)) => CasResp { error: None, success: b },
             Ok(_) => CasResp { error: Some(e(6, "unexpected response")), success: false },
@@ -214,7 +215,19 @@ impl Kv for KvSvc {
     async fn prewrite(&self, req: Request<PrewriteReq>) -> Res<PrewriteResp> {
         let r = req.into_inner();
         let Some(first) = r.mutations.first().map(|m| m.key.clone()) else { return Ok(Response::new(PrewriteResp { error: None, errors: vec![] })) };
-        let muts = r.mutations.iter().map(|m| Mut { op: match m.op { 1 => MutOp::Put, 2 => MutOp::Delete, _ => MutOp::Lock }, key: m.key.clone(), value: m.value.clone() }).collect();
+        let muts = r
+            .mutations
+            .iter()
+            .map(|m| Mut {
+                op: match m.op {
+                    1 => MutOp::Put,
+                    2 => MutOp::Delete,
+                    _ => MutOp::Lock,
+                },
+                key: m.key.clone(),
+                value: m.value.clone(),
+            })
+            .collect();
         let cmd = Cmd::Prewrite { muts, primary: r.primary, start_ts: r.start_ts, ttl_ms: r.ttl_ms, read_keys: r.read_keys };
         Ok(Response::new(match self.0.write(&r.ctx, &first, cmd).await {
             Ok(Resp::Ok) => PrewriteResp { error: None, errors: vec![] },
@@ -275,7 +288,9 @@ impl Kv for KvSvc {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
+                    Ok(ev) =>
+                    {
+                        #[allow(clippy::collapsible_if)]
                         if ev.key.as_slice() >= start.as_slice() && (end.is_empty() || ev.key.as_slice() < end.as_slice()) {
                             if tx.send(Ok(Event { index: ev.index, key: ev.key.clone(), value: ev.value.clone(), deleted: ev.deleted })).await.is_err() {
                                 return;

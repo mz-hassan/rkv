@@ -92,13 +92,24 @@ impl WriteRec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeyError {
-    Locked { key: Vec<u8>, lock: Lock },
+    Locked {
+        key: Vec<u8>,
+        lock: Lock,
+    },
     /// someone committed `key` at `conflict_ts` >= our start_ts (or we were rolled back)
-    WriteConflict { key: Vec<u8>, conflict_ts: u64 },
+    WriteConflict {
+        key: Vec<u8>,
+        conflict_ts: u64,
+    },
     /// commit found neither our lock nor a commit record: the txn was rolled back
-    TxnNotFound { key: Vec<u8> },
+    TxnNotFound {
+        key: Vec<u8>,
+    },
     /// rollback requested but the transaction already committed
-    AlreadyCommitted { key: Vec<u8>, commit_ts: u64 },
+    AlreadyCommitted {
+        key: Vec<u8>,
+        commit_ts: u64,
+    },
 }
 
 pub fn get_lock<S: TxnStore>(s: &S, key: &[u8]) -> Option<Lock> {
@@ -247,8 +258,12 @@ pub fn rollback<S: TxnStore>(s: &S, b: &mut Batch, key: &[u8], start_ts: u64) ->
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TxnStatus {
     /// primary lock still alive; remaining ttl
-    Locked { ttl_ms: u64 },
-    Committed { commit_ts: u64 },
+    Locked {
+        ttl_ms: u64,
+    },
+    Committed {
+        commit_ts: u64,
+    },
     RolledBack,
     NotExist,
 }

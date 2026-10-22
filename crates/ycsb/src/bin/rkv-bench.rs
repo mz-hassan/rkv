@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 //! rkv-bench: benchmark and verification driver.
 //!   engine            S1: single-node engine YCSB (+ optional RocksDB baseline with --features rocksdb-baseline)
 //!   s2-sim            S2: crash consistency under simulated power loss (MemFs: unsynced data lost/torn)
@@ -8,7 +9,7 @@
 //!   txn-skew          D2: write-skew detection, snapshot vs serializable
 //!   lock-recovery     D2: time for readers to recover from a crashed transaction coordinator
 //! Every subcommand accepts --out DIR (default bench/results) and --id NAME, and prints the result path.
-use kv_engine::{CompactionStyle, Db, MemFs, OsFs, Options, SyncPolicy};
+use kv_engine::{CompactionStyle, Db, MemFs, Options, OsFs, SyncPolicy};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use serde_json::{json, Value};
@@ -51,6 +52,7 @@ fn parse_sync(s: &str) -> SyncPolicy {
 
 // ------------------------------------------------------------------ S1: engine
 
+#[allow(dead_code)]
 trait SyncKv: Send + Sync {
     fn get(&self, k: &[u8]) -> bool;
     fn put(&self, k: &[u8], v: &[u8]);
@@ -96,7 +98,8 @@ impl SyncKv for RkvKv {
         let s = self.db.stats();
         let m = self.db.metrics();
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        let (user, wal, flush, comp) = (g(&m.user_bytes) - self.m0[0], g(&m.wal_bytes) - self.m0[1], g(&m.flush_bytes) - self.m0[2], g(&m.compact_write) - self.m0[3]);
+        let (user, wal, flush, comp) =
+            (g(&m.user_bytes) - self.m0[0], g(&m.wal_bytes) - self.m0[1], g(&m.flush_bytes) - self.m0[2], g(&m.compact_write) - self.m0[3]);
         let absent = s.bloom_negatives + s.bloom_false_positives;
         json!({
             "write_amp_run_phase": if user > 0 { (wal + flush + comp) as f64 / user as f64 } else { 0.0 },
@@ -161,7 +164,10 @@ fn open_backend(a: &Args, dir: &str, sync: SyncPolicy) -> (Arc<dyn SyncKv>, Valu
             wo.set_sync(matches!(sync, SyncPolicy::Always));
             let _ = wo;
             let db = rocksdb::DB::open(&o, dir).unwrap();
-            (Arc::new(RocksKv { db }), json!({"backend": "rocksdb", "crate": "rocksdb 0.22", "note": "sync policy approximated: group commit not separately configurable"}))
+            (
+                Arc::new(RocksKv { db }),
+                json!({"backend": "rocksdb", "crate": "rocksdb 0.22", "note": "sync policy approximated: group commit not separately configurable"}),
+            )
         }
         _ => {
             let opts = Options {
@@ -176,8 +182,16 @@ fn open_backend(a: &Args, dir: &str, sync: SyncPolicy) -> (Arc<dyn SyncKv>, Valu
             let db = Db::open(opts.clone(), OsFs::new_arc(strict), dir).unwrap();
             let base = db.stats();
             let m = db.metrics();
-            let m0 = [m.user_bytes.load(Ordering::Relaxed), m.wal_bytes.load(Ordering::Relaxed), m.flush_bytes.load(Ordering::Relaxed), m.compact_write.load(Ordering::Relaxed)];
-            (Arc::new(RkvKv { db, base, m0 }), json!({"backend": "rkv-engine", "memtable_mb": mem_mb, "cache_mb": cache_mb, "compaction": format!("{:?}", opts.compaction), "sync": format!("{sync:?}"), "full_fsync_macos": strict}))
+            let m0 = [
+                m.user_bytes.load(Ordering::Relaxed),
+                m.wal_bytes.load(Ordering::Relaxed),
+                m.flush_bytes.load(Ordering::Relaxed),
+                m.compact_write.load(Ordering::Relaxed),
+            ];
+            (
+                Arc::new(RkvKv { db, base, m0 }),
+                json!({"backend": "rkv-engine", "memtable_mb": mem_mb, "cache_mb": cache_mb, "compaction": format!("{:?}", opts.compaction), "sync": format!("{sync:?}"), "full_fsync_macos": strict}),
+            )
         }
     }
 }
@@ -328,7 +342,12 @@ fn run_recovery(a: &Args) {
         db.put(&key_for(i), &value_for(i, 128)).unwrap();
     }
     db.sync_wal().unwrap();
-    let wal_bytes: u64 = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".wal")).map(|e| e.metadata().map(|m| m.len()).unwrap_or(0)).sum();
+    let wal_bytes: u64 = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".wal"))
+        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0))
+        .sum();
     std::mem::forget(db); // emulate a crash: no flush, no clean close
     let t = Instant::now();
     let db2 = Db::open(Options { background: false, ..opts }, OsFs::new_arc(false), &dir).unwrap();
@@ -348,7 +367,17 @@ fn run_s2_sim(a: &Args) {
     let mut acked_total = 0u64;
     let mut rng = ChaCha8Rng::seed_from_u64(a.u("--seed", 1));
     let t0 = Instant::now();
-    let opts = Options { memtable_size: 4096, block_size: 256, l0_compaction_trigger: 2, level_base_bytes: 8192, target_file_size: 4096, max_levels: 4, sync: SyncPolicy::Group, background: false, ..Options::default() };
+    let opts = Options {
+        memtable_size: 4096,
+        block_size: 256,
+        l0_compaction_trigger: 2,
+        level_base_bytes: 8192,
+        target_file_size: 4096,
+        max_levels: 4,
+        sync: SyncPolicy::Group,
+        background: false,
+        ..Options::default()
+    };
     for it in 0..iters {
         let fs = MemFs::new();
         let vfs = fs.as_vfs();
@@ -505,7 +534,9 @@ impl Be {
         match self {
             Be::Rkv(c) => c.scan(k, &[], n).await.map(|_| ()).map_err(|e| e.to_string()),
             #[cfg(feature = "etcd-baseline")]
-            Be::Etcd(c) => c.clone().get(k, Some(etcd_client::GetOptions::new().with_from_key().with_limit(n as i64))).await.map(|_| ()).map_err(|e| e.to_string()),
+            Be::Etcd(c) => {
+                c.clone().get(k, Some(etcd_client::GetOptions::new().with_from_key().with_limit(n as i64))).await.map(|_| ()).map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -594,7 +625,11 @@ async fn run_cluster(a: &Args) {
                     let sec = t1.elapsed().as_secs();
                     let mut tl = timeline.lock().unwrap();
                     let e = tl.entry(sec).or_insert((0, 0, 0));
-                    if r.is_err() { e.1 += 1 } else { e.0 += 1 }
+                    if r.is_err() {
+                        e.1 += 1
+                    } else {
+                        e.0 += 1
+                    }
                     e.2 = e.2.max(s.elapsed().as_micros() as u64);
                 }
             }
@@ -649,13 +684,15 @@ async fn run_txn_bank(a: &Args) {
     }
     let load_secs = t0.elapsed().as_secs_f64();
     let zipf = Arc::new(ycsb::dist::Zipf::new(accounts, theta));
-    let (commits, conflicts, aborted, other) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (commits, conflicts, aborted, other) =
+        (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let done = Arc::new(AtomicU64::new(0));
     let deadline = if secs > 0 { Some(Instant::now() + Duration::from_secs(secs)) } else { None };
     let t1 = Instant::now();
     let mut hs = vec![];
     for c in 0..nclients {
-        let (tc, zipf, commits, conflicts, aborted, other, done) = (tc.clone(), zipf.clone(), commits.clone(), conflicts.clone(), aborted.clone(), other.clone(), done.clone());
+        let (tc, zipf, commits, conflicts, aborted, other, done) =
+            (tc.clone(), zipf.clone(), commits.clone(), conflicts.clone(), aborted.clone(), other.clone(), done.clone());
         hs.push(tokio::spawn(async move {
             let mut rng = ChaCha8Rng::seed_from_u64(c as u64 + 5);
             let mut h = Hist::new();
@@ -716,7 +753,7 @@ async fn run_txn_bank(a: &Args) {
     }
     let run_secs = t1.elapsed().as_secs_f64();
     tokio::time::sleep(Duration::from_millis(1500)).await; // let async secondary commits land
-    // audit: total must be conserved
+                                                           // audit: total must be conserved
     let mut total = 0i64;
     let mut audit_ok = false;
     for _ in 0..5 {
@@ -830,7 +867,15 @@ async fn run_lock_recovery(a: &Args) {
         let (k2, ts2) = (key.clone(), start_ts);
         tc.router
             .exec(&key, 0, 0, |mut c, ctx| {
-                let req = PrewriteReq { ctx: Some(ctx), mutations: vec![Mutation { op: 1, key: k2.clone(), value: b"orphan".to_vec() }], primary: k2.clone(), start_ts: ts2, ttl_ms: ttl, read_keys: vec![], now_ms: 0 };
+                let req = PrewriteReq {
+                    ctx: Some(ctx),
+                    mutations: vec![Mutation { op: 1, key: k2.clone(), value: b"orphan".to_vec() }],
+                    primary: k2.clone(),
+                    start_ts: ts2,
+                    ttl_ms: ttl,
+                    read_keys: vec![],
+                    now_ms: 0,
+                };
                 async move { c.prewrite(req).await }
             })
             .await

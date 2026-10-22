@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 //! rkv-operator: manages an `RkvCluster` custom resource.
 //!
 //!   * rolling upgrade: change `spec.image`; the operator patches the store StatefulSet with `partition = replicas`
@@ -6,7 +7,8 @@
 //!   * scale out: raise `spec.storeReplicas`; the PD scheduler moves replicas onto the new store by itself.
 //!   * scale in: the operator asks PD to drain the highest-numbered store (`evict_store`); only when it holds zero
 //!     ranges does it reduce the StatefulSet, so Raft membership never drops below quorum.
-//!   `rkv-operator crd` prints the CRD (kubectl apply -f -).
+//!
+//! `rkv-operator crd` prints the CRD (kubectl apply -f -).
 use ::kv_client::PdClient;
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
@@ -90,7 +92,11 @@ async fn pd_health(ns: &str, pd_replicas: usize, min_voters: usize) -> Result<He
     Ok(Health {
         stores_alive: all.stores.iter().filter(|s| s.alive).count(),
         ranges: all.ranges.len(),
-        ranges_ok: !all.ranges.is_empty() && all.ranges.iter().all(|r| r.leader_store != 0 && r.peers.iter().filter(|p| !p.learner).count() >= min_voters && r.peers.iter().all(|p| !p.learner)),
+        ranges_ok: !all.ranges.is_empty()
+            && all
+                .ranges
+                .iter()
+                .all(|r| r.leader_store != 0 && r.peers.iter().filter(|p| !p.learner).count() >= min_voters && r.peers.iter().all(|p| !p.learner)),
         store_ranges,
     })
 }
@@ -99,6 +105,7 @@ fn sts_image(s: &StatefulSet) -> String {
     s.spec.as_ref().and_then(|s| s.template.spec.as_ref()).and_then(|p| p.containers.first()).and_then(|c| c.image.clone()).unwrap_or_default()
 }
 
+#[allow(unused_assignments)]
 async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error> {
     let t0 = Instant::now();
     let ns = obj.namespace().unwrap_or_else(|| "rkv".into());
@@ -177,7 +184,13 @@ async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error>
         };
     }
 
-    let status = RkvClusterStatus { phase: phase.clone(), message: message.clone(), ready_stores: ready, image: sts_image(&sts), last_reconcile_ms: t0.elapsed().as_millis() as u64 };
+    let status = RkvClusterStatus {
+        phase: phase.clone(),
+        message: message.clone(),
+        ready_stores: ready,
+        image: sts_image(&sts),
+        last_reconcile_ms: t0.elapsed().as_millis() as u64,
+    };
     clusters.patch_status(&obj.name_any(), &PatchParams::default(), &Patch::Merge(json!({ "status": status }))).await?;
     tracing::info!(cluster = %obj.name_any(), %phase, %message, reconcile_ms = status.last_reconcile_ms, "reconciled");
     Ok(Action::requeue(requeue))

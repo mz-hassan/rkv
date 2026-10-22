@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 95adcbf052aa547091c742586179d7c12036b27a498391166e621fd261468b81 # shrinks to ops = [Put(29, 10), Flush, Put(36, 37110), Flush, Put(2, 19780), Flush, Put(22, 33305), Put(5, 54250), Flush, Put(6, 1060), Flush, Put(4, 14335), Flush, Put(0, 44860), Flush, Put(3, 13290), Flush, Put(24, 4400), Flush, Put(2, 17440), Flush, Put(37, 8265), Flush, Put(26, 40015), Put(14, 19590), Flush, Put(2, 17560), Flush, Put(10, 500), Put(13, 6365), Put(27, 26925), Flush, Del(7), Flush, Put(16, 52880), Flush, Put(5, 17951), Compact, Put(9, 53006), Crash(9423648116644986435), Put(17, 49234), Put(15, 58912), Put(38, 19435), Put(12, 60852), Crash(15409455212825268363), Put(21, 56945), Flush, Del(30), Crash(13618724182948972689), Put(35, 49197), Crash(617990086710577578), Put(34, 64003), Put(19, 19208), Flush, Put(20, 31071), Crash(9977675375391829591), Put(4, 39989), Flush, Del(18), Flush, Put(37, 34031), Crash(1792133727307610933), Del(13), Flush, Put(32, 53461), Crash(15379947317568042301), Put(34, 27274), Compact]

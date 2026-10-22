@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::new_without_default)]
 //! Safety invariants asserted continuously during simulation and chaos runs.
 pub mod bank;
 
@@ -62,7 +63,9 @@ impl RaftInvariants {
     pub fn on_apply(&mut self, node: NodeId, e: &Entry) {
         self.checks += 1;
         match self.committed.get(&e.index) {
-            Some(prev) if prev != e => self.fail(format!("state machine safety: node {node} applied {:?} at {} but {:?} was applied elsewhere", e, e.index, prev)),
+            Some(prev) if prev != e => {
+                self.fail(format!("state machine safety: node {node} applied {:?} at {} but {:?} was applied elsewhere", e, e.index, prev))
+            }
             Some(_) => {}
             None => {
                 self.committed.insert(e.index, e.clone());

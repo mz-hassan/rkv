@@ -2,7 +2,6 @@
 //! resolution, two-phase commit across ranges, optional serializable validation.
 use crate::pd::PdClient;
 use crate::router::{ClientError, Router};
-use crate::*;
 use rkv_proto::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -20,7 +19,9 @@ pub enum IsolationLevel {
 #[derive(Debug, Clone)]
 pub enum TxnError {
     /// first-committer-wins write conflict
-    Conflict { key: Vec<u8> },
+    Conflict {
+        key: Vec<u8>,
+    },
     /// the transaction was rolled back (e.g. by lock resolution after a timeout)
     Aborted(String),
     /// the commit outcome could not be determined
@@ -77,10 +78,13 @@ impl TxnClient {
         for attempt in 0..40u32 {
             let now = self.now_ms().await?;
             let (primary, start_ts) = (lock.primary.clone(), lock.start_ts);
-            let st = self.router.exec(&lock.primary, 0, 0, |mut c, ctx| {
-                let req = CheckTxnStatusReq { ctx: Some(ctx), primary: primary.clone(), start_ts, now_ms: now, rollback_if_not_exist: rine };
-                async move { c.check_txn_status(req).await }
-            }).await?;
+            let st = self
+                .router
+                .exec(&lock.primary, 0, 0, |mut c, ctx| {
+                    let req = CheckTxnStatusReq { ctx: Some(ctx), primary: primary.clone(), start_ts, now_ms: now, rollback_if_not_exist: rine };
+                    async move { c.check_txn_status(req).await }
+                })
+                .await?;
             let commit_ts = match st.action {
                 0 => {
                     // owner is alive: wait (bounded by its ttl)
@@ -99,10 +103,12 @@ impl TxnClient {
                 }
             };
             let key = lock.key.clone();
-            self.router.exec(&lock.key, 0, 0, |mut c, ctx| {
-                let req = ResolveLockReq { ctx: Some(ctx), start_ts, commit_ts, keys: vec![key.clone()] };
-                async move { c.resolve_lock(req).await }
-            }).await?;
+            self.router
+                .exec(&lock.key, 0, 0, |mut c, ctx| {
+                    let req = ResolveLockReq { ctx: Some(ctx), start_ts, commit_ts, keys: vec![key.clone()] };
+                    async move { c.resolve_lock(req).await }
+                })
+                .await?;
             return Ok(());
         }
         Err(TxnError::Aborted("lock resolution did not converge".into()))
@@ -132,10 +138,14 @@ impl Txn {
         let ts = self.start_ts;
         for _ in 0..60 {
             let k = key.to_vec();
-            let r = self.c.router.exec(key, 0, 0, |mut c, ctx| {
-                let req = TxnGetReq { ctx: Some(ctx), key: k.clone(), ts };
-                async move { c.txn_get(req).await }
-            }).await?;
+            let r = self
+                .c
+                .router
+                .exec(key, 0, 0, |mut c, ctx| {
+                    let req = TxnGetReq { ctx: Some(ctx), key: k.clone(), ts };
+                    async move { c.txn_get(req).await }
+                })
+                .await?;
             if let Some(l) = r.lock {
                 self.c.resolve_lock(&l).await?;
                 continue;
@@ -154,10 +164,14 @@ impl Txn {
             let mut done = false;
             for _ in 0..60 {
                 let (s, e) = (cur.clone(), end.to_vec());
-                let r = self.c.router.exec(&cur, 0, 0, |mut c, ctx| {
-                    let req = TxnScanReq { ctx: Some(ctx), start: s.clone(), end: e.clone(), limit: 0, ts };
-                    async move { c.txn_scan(req).await }
-                }).await?;
+                let r = self
+                    .c
+                    .router
+                    .exec(&cur, 0, 0, |mut c, ctx| {
+                        let req = TxnScanReq { ctx: Some(ctx), start: s.clone(), end: e.clone(), limit: 0, ts };
+                        async move { c.txn_scan(req).await }
+                    })
+                    .await?;
                 if let Some(l) = r.lock {
                     self.c.resolve_lock(&l).await?;
                     continue;
@@ -201,19 +215,27 @@ impl Txn {
             let _ = k;
             let st = self.start_ts;
             let g = group.clone();
-            let r = self.c.router.exec_ff(&group[0], |mut c, ctx| {
-                let req = RollbackReq { ctx: Some(ctx), keys: g.clone(), start_ts: st };
-                async move { c.rollback(req).await }
-            }).await;
+            let r = self
+                .c
+                .router
+                .exec_ff(&group[0], |mut c, ctx| {
+                    let req = RollbackReq { ctx: Some(ctx), keys: g.clone(), start_ts: st };
+                    async move { c.rollback(req).await }
+                })
+                .await;
             if let Err(ClientError::RangeMoved) = r {
                 // regroup key by key (rare)
                 for key in group {
                     let st = self.start_ts;
                     let kk = vec![key.clone()];
-                    let _ = self.c.router.exec(&key, 0, 0, |mut c, ctx| {
-                        let req = RollbackReq { ctx: Some(ctx), keys: kk.clone(), start_ts: st };
-                        async move { c.rollback(req).await }
-                    }).await;
+                    let _ = self
+                        .c
+                        .router
+                        .exec(&key, 0, 0, |mut c, ctx| {
+                            let req = RollbackReq { ctx: Some(ctx), keys: kk.clone(), start_ts: st };
+                            async move { c.rollback(req).await }
+                        })
+                        .await;
                 }
             }
         }
@@ -234,7 +256,19 @@ impl Txn {
     pub async fn commit(mut self) -> Result<u64, TxnError> {
         let serializable = self.c.iso == IsolationLevel::Serializable;
         // keys read but not written become lock-only mutations under serializable isolation
-        let mut muts: BTreeMap<Vec<u8>, (u32, Vec<u8>)> = self.writes.iter().map(|(k, v)| (k.clone(), match v { Some(v) => (1u32, v.clone()), None => (2u32, vec![]) })).collect();
+        let mut muts: BTreeMap<Vec<u8>, (u32, Vec<u8>)> = self
+            .writes
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    match v {
+                        Some(v) => (1u32, v.clone()),
+                        None => (2u32, vec![]),
+                    },
+                )
+            })
+            .collect();
         if serializable {
             for k in std::mem::take(&mut self.reads) {
                 muts.entry(k).or_insert((3, vec![]));
@@ -263,10 +297,21 @@ impl Txn {
                 futs.push(tokio::spawn(async move {
                     let first = g[0].clone();
                     loop {
-                        let r = c.router.exec_ff(&first, |mut cl, ctx| {
-                            let req = PrewriteReq { ctx: Some(ctx), mutations: mutations.clone(), primary: primary.clone(), start_ts: st, ttl_ms: ttl, read_keys: vec![], now_ms: 0 };
-                            async move { cl.prewrite(req).await }
-                        }).await;
+                        let r = c
+                            .router
+                            .exec_ff(&first, |mut cl, ctx| {
+                                let req = PrewriteReq {
+                                    ctx: Some(ctx),
+                                    mutations: mutations.clone(),
+                                    primary: primary.clone(),
+                                    start_ts: st,
+                                    ttl_ms: ttl,
+                                    read_keys: vec![],
+                                    now_ms: 0,
+                                };
+                                async move { cl.prewrite(req).await }
+                            })
+                            .await;
                         match r {
                             Ok(resp) if resp.errors.is_empty() => return Ok(()),
                             Ok(resp) => {
@@ -275,9 +320,7 @@ impl Txn {
                                 for e in &resp.errors {
                                     if let Some(l) = &e.locked {
                                         if l.start_ts != st {
-                                            if let Err(err) = c.resolve_lock(l).await {
-                                                return Err(err);
-                                            }
+                                            c.resolve_lock(l).await?;
                                             continue;
                                         }
                                     }
@@ -315,7 +358,7 @@ impl Txn {
         }
 
         // ---- phase 2: commit. The commit point is the primary's range applying Commit.
-        let commit_ts = self.c.pd.tso_fresh().await.map_err(|e| TxnError::Unknown(e))?;
+        let commit_ts = self.c.pd.tso_fresh().await.map_err(TxnError::Unknown)?;
         let groups = self.group_keys(&keys).await?;
         let primary_info = self.c.router.locate(&primary).await?;
         let mut secondaries = vec![];
@@ -333,10 +376,14 @@ impl Txn {
         let mut committed = false;
         for _ in 0..6 {
             let (pk, st) = (primary_keys.clone(), self.start_ts);
-            let r = self.c.router.exec_ff(&primary_keys[0], |mut c, ctx| {
-                let req = CommitReq { ctx: Some(ctx), keys: pk.clone(), start_ts: st, commit_ts };
-                async move { c.commit(req).await }
-            }).await;
+            let r = self
+                .c
+                .router
+                .exec_ff(&primary_keys[0], |mut c, ctx| {
+                    let req = CommitReq { ctx: Some(ctx), keys: pk.clone(), start_ts: st, commit_ts };
+                    async move { c.commit(req).await }
+                })
+                .await;
             match r {
                 Ok(resp) => {
                     if let Some(ke) = resp.key_error {
@@ -352,10 +399,14 @@ impl Txn {
                     for k in primary_keys.clone() {
                         let st = self.start_ts;
                         let kk = vec![k.clone()];
-                        let res = self.c.router.exec(&k, 0, 0, |mut c, ctx| {
-                            let req = CommitReq { ctx: Some(ctx), keys: kk.clone(), start_ts: st, commit_ts };
-                            async move { c.commit(req).await }
-                        }).await;
+                        let res = self
+                            .c
+                            .router
+                            .exec(&k, 0, 0, |mut c, ctx| {
+                                let req = CommitReq { ctx: Some(ctx), keys: kk.clone(), start_ts: st, commit_ts };
+                                async move { c.commit(req).await }
+                            })
+                            .await;
                         match res {
                             Ok(resp) if resp.key_error.is_none() => {}
                             _ => ok = false,
@@ -370,10 +421,15 @@ impl Txn {
                     // outcome unknown: ask the primary
                     let now = self.c.now_ms().await.unwrap_or(0);
                     let (p, st) = (primary.clone(), self.start_ts);
-                    if let Ok(s) = self.c.router.exec(&primary, 0, 0, |mut c, ctx| {
-                        let req = CheckTxnStatusReq { ctx: Some(ctx), primary: p.clone(), start_ts: st, now_ms: now, rollback_if_not_exist: false };
-                        async move { c.check_txn_status(req).await }
-                    }).await {
+                    if let Ok(s) = self
+                        .c
+                        .router
+                        .exec(&primary, 0, 0, |mut c, ctx| {
+                            let req = CheckTxnStatusReq { ctx: Some(ctx), primary: p.clone(), start_ts: st, now_ms: now, rollback_if_not_exist: false };
+                            async move { c.check_txn_status(req).await }
+                        })
+                        .await
+                    {
                         match s.action {
                             1 => {
                                 committed = true;
@@ -396,17 +452,23 @@ impl Txn {
             for g in secondaries {
                 let first = g[0].clone();
                 let gg = g.clone();
-                let r = c.router.exec_ff(&first, |mut cl, ctx| {
-                    let req = CommitReq { ctx: Some(ctx), keys: gg.clone(), start_ts: st, commit_ts };
-                    async move { cl.commit(req).await }
-                }).await;
+                let r = c
+                    .router
+                    .exec_ff(&first, |mut cl, ctx| {
+                        let req = CommitReq { ctx: Some(ctx), keys: gg.clone(), start_ts: st, commit_ts };
+                        async move { cl.commit(req).await }
+                    })
+                    .await;
                 if let Err(ClientError::RangeMoved) = r {
                     for k in g {
                         let kk = vec![k.clone()];
-                        let _ = c.router.exec(&k, 0, 0, |mut cl, ctx| {
-                            let req = CommitReq { ctx: Some(ctx), keys: kk.clone(), start_ts: st, commit_ts };
-                            async move { cl.commit(req).await }
-                        }).await;
+                        let _ = c
+                            .router
+                            .exec(&k, 0, 0, |mut cl, ctx| {
+                                let req = CommitReq { ctx: Some(ctx), keys: kk.clone(), start_ts: st, commit_ts };
+                                async move { cl.commit(req).await }
+                            })
+                            .await;
                     }
                 }
             }

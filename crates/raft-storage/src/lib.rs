@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::new_without_default)]
 //! Durable Raft log/hard-state/snapshot storage on its own WAL.
 //!
 //! WAL records (framed by kv-engine's WAL framing: crc32 + len):
@@ -119,7 +120,16 @@ impl RaftStorage {
             }
             None => None,
         };
-        let mut st = RaftStorage { fs, dir: dir.to_string(), wal: file, hs: hs.clone(), snap: snap.clone(), snap_data: snap_data.clone(), entries: entries.clone(), rewrite_slack: 4 << 20 };
+        let mut st = RaftStorage {
+            fs,
+            dir: dir.to_string(),
+            wal: file,
+            hs: hs.clone(),
+            snap: snap.clone(),
+            snap_data: snap_data.clone(),
+            entries: entries.clone(),
+            rewrite_slack: 4 << 20,
+        };
         if needs_rewrite {
             st.rewrite()?;
         }
@@ -179,7 +189,7 @@ impl RaftStorage {
     /// Durably persist everything in `rd` (call BEFORE sending rd.messages).
     pub fn save(&mut self, rd: &Ready, sync: bool) -> io::Result<()> {
         let mut buf: Vec<u8> = vec![];
-        let mut frame = |p: &[u8], buf: &mut Vec<u8>| buf.extend_from_slice(&WalWriter::encode(p));
+        let frame = |p: &[u8], buf: &mut Vec<u8>| buf.extend_from_slice(&WalWriter::encode(p));
         let mut new_snap: Option<Snapshot> = None;
         if let Some(s) = rd.install_snapshot.as_ref().or(rd.save_snapshot.as_ref()) {
             self.write_snapshot_file(s)?;

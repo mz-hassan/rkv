@@ -225,11 +225,11 @@ impl VFile for MemFile {
         {
             let mut st = self.fs.st.lock();
             if st.fail_all_syncs {
-                return Err(io::Error::new(io::ErrorKind::Other, "injected fsync failure"));
+                return Err(io::Error::other("injected fsync failure"));
             }
             if st.fail_next_syncs > 0 {
                 st.fail_next_syncs -= 1;
-                return Err(io::Error::new(io::ErrorKind::Other, "injected fsync failure"));
+                return Err(io::Error::other("injected fsync failure"));
             }
         }
         let mut d = self.inner.d.lock();
@@ -284,13 +284,7 @@ impl Vfs for MemFsHandle {
     fn list(&self, dir: &str) -> io::Result<Vec<String>> {
         let prefix = if dir.ends_with('/') { dir.to_string() } else { format!("{dir}/") };
         let st = self.0.st.lock();
-        Ok(st
-            .files
-            .keys()
-            .filter_map(|k| k.strip_prefix(&prefix))
-            .filter(|r| !r.contains('/'))
-            .map(|s| s.to_string())
-            .collect())
+        Ok(st.files.keys().filter_map(|k| k.strip_prefix(&prefix)).filter(|r| !r.contains('/')).map(|s| s.to_string()).collect())
     }
     fn mkdir(&self, _dir: &str) -> io::Result<()> {
         Ok(())

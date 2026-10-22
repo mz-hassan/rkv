@@ -51,7 +51,8 @@ fn start(n: u64) -> Cluster {
     for id in 1..=n {
         let fs = MemFs::new();
         let sm = Arc::new(SumSm { state: Mutex::new((0, 0)) });
-        let h = spawn_group(1, id, Membership::new(1..=n), fs.as_vfs(), "/g1", sm.clone(), Arc::new(MemTransport { net: net.clone(), from: id }), opts()).unwrap();
+        let h =
+            spawn_group(1, id, Membership::new(1..=n), fs.as_vfs(), "/g1", sm.clone(), Arc::new(MemTransport { net: net.clone(), from: id }), opts()).unwrap();
         net.handles.lock().unwrap().insert((id, 1), h.clone());
         c.sms.push(sm);
         c.fs.push(fs);
@@ -124,7 +125,17 @@ async fn restart_recovers_from_disk() {
     c.handles[f].stop().await;
     c.fs[f].crash(9);
     let sm = Arc::new(SumSm { state: Mutex::new((0, 0)) });
-    let h = spawn_group(1, f as u64 + 1, Membership::new(1..=3), c.fs[f].as_vfs(), "/g1", sm.clone(), Arc::new(MemTransport { net: c.net.clone(), from: f as u64 + 1 }), opts()).unwrap();
+    let h = spawn_group(
+        1,
+        f as u64 + 1,
+        Membership::new(1..=3),
+        c.fs[f].as_vfs(),
+        "/g1",
+        sm.clone(),
+        Arc::new(MemTransport { net: c.net.clone(), from: f as u64 + 1 }),
+        opts(),
+    )
+    .unwrap();
     c.net.handles.lock().unwrap().insert((f as u64 + 1, 1), h);
     c.handles[l].propose(1u64.to_le_bytes().to_vec()).await.unwrap();
     for _ in 0..300 {
@@ -145,7 +156,8 @@ async fn membership_change_adds_a_node() {
     for id in 1..=4u64 {
         let fs = MemFs::new();
         let sm = Arc::new(SumSm { state: Mutex::new((0, 0)) });
-        let h = spawn_group(1, id, Membership::new(1..=3), fs.as_vfs(), "/g1", sm.clone(), Arc::new(MemTransport { net: net.clone(), from: id }), opts()).unwrap();
+        let h =
+            spawn_group(1, id, Membership::new(1..=3), fs.as_vfs(), "/g1", sm.clone(), Arc::new(MemTransport { net: net.clone(), from: id }), opts()).unwrap();
         net.handles.lock().unwrap().insert((id, 1), h.clone());
         hs.push(h);
         sms.push(sm);

@@ -157,7 +157,6 @@ struct State {
     next_file: u64,
     seq: u64,
     manifest: WalWriter,
-    manifest_no: u64,
     bg_err: Option<String>,
     last_sync: Instant,
     compact_ptr: Vec<Vec<u8>>,
@@ -259,12 +258,8 @@ impl Db {
             version.normalize();
         }
         // replay WALs
-        let mut wals: Vec<u64> = fs
-            .list(dir)?
-            .iter()
-            .filter_map(|n| n.strip_suffix(".wal").and_then(|s| s.parse::<u64>().ok()))
-            .filter(|n| *n >= log_number)
-            .collect();
+        let mut wals: Vec<u64> =
+            fs.list(dir)?.iter().filter_map(|n| n.strip_suffix(".wal").and_then(|s| s.parse::<u64>().ok())).filter(|n| *n >= log_number).collect();
         wals.sort();
         let recovered = Memtable::new(0);
         for n in &wals {
@@ -305,7 +300,14 @@ impl Db {
         let mut edits = vec![Edit::LogNumber(wal_no), Edit::NextFile(next_file), Edit::LastSeq(last_seq)];
         for (l, fl) in version.levels.iter().enumerate() {
             for f in fl {
-                edits.push(Edit::AddFile { level: l as u32, id: f.id, size: f.size, smallest: f.smallest.clone(), largest: f.largest.clone(), max_ts: f.max_ts });
+                edits.push(Edit::AddFile {
+                    level: l as u32,
+                    id: f.id,
+                    size: f.size,
+                    smallest: f.smallest.clone(),
+                    largest: f.largest.clone(),
+                    max_ts: f.max_ts,
+                });
             }
         }
         manifest.append(&encode_edits(&edits))?;
@@ -340,7 +342,6 @@ impl Db {
             next_file,
             seq: last_seq,
             manifest,
-            manifest_no,
             bg_err: None,
             last_sync: Instant::now(),
             compact_ptr: vec![vec![]; opts.max_levels],
@@ -399,7 +400,7 @@ impl Db {
     }
 
     pub fn write(&self, batch: WriteBatch) -> io::Result<()> {
-        self.inner.write(batch).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.inner.write(batch).map_err(io::Error::other)
     }
 
     pub fn get(&self, k: &[u8]) -> io::Result<Option<Vec<u8>>> {
@@ -417,11 +418,11 @@ impl Db {
 
     /// Flush the memtable and wait until all immutables are persisted.
     pub fn flush(&self) -> io::Result<()> {
-        self.inner.force_flush().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.inner.force_flush().map_err(io::Error::other)
     }
     /// Run compactions until none is needed.
     pub fn compact_until_idle(&self) -> io::Result<()> {
-        self.inner.compact_until_idle().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.inner.compact_until_idle().map_err(io::Error::other)
     }
     pub fn sync_wal(&self) -> io::Result<()> {
         let w = self.inner.st.lock().wal.clone();
@@ -451,8 +452,7 @@ impl Db {
         let m = &self.inner.metrics;
         let user = m.user_bytes.load(AO::Relaxed) as f64;
         if user > 0.0 {
-            s.write_amp =
-                (m.wal_bytes.load(AO::Relaxed) + m.flush_bytes.load(AO::Relaxed) + m.compact_write.load(AO::Relaxed)) as f64 / user;
+            s.write_amp = (m.wal_bytes.load(AO::Relaxed) + m.flush_bytes.load(AO::Relaxed) + m.compact_write.load(AO::Relaxed)) as f64 / user;
         }
         s
     }
@@ -825,7 +825,7 @@ impl Inner {
         self.metrics.gets.fetch_add(1, AO::Relaxed);
         let (mem, imms, ver) = self.sources();
         let mut best: Option<Entry> = None;
-        let mut consider = |e: Entry, best: &mut Option<Entry>| {
+        let consider = |e: Entry, best: &mut Option<Entry>| {
             if best.as_ref().map(|b| e.ts() > b.ts()).unwrap_or(true) {
                 *best = Some(e);
             }
@@ -1027,7 +1027,7 @@ impl Inner {
                     let lo = inputs.iter().map(|f| f.small_u().to_vec()).min().unwrap();
                     let hi = inputs.iter().map(|f| f.large_u().to_vec()).max().unwrap();
                     let next = ver.overlapping(1, &lo, &hi);
-                    let drop = self.is_bottom(&ver, 1, &lo, &hi);
+                    let drop = self.is_bottom_for(&ver, 1, &inputs, &next);
                     return Some(Job { level: 0, out_level: 1, inputs, next, drop_tombstones: drop, split_files: true });
                 }
                 let mut best: Option<(f64, usize)> = None;
@@ -1044,10 +1044,20 @@ impl Inner {
                 let f = files.iter().find(|f| f.small_u() > ptr.as_slice()).unwrap_or(&files[0]).clone();
                 st.compact_ptr[l] = f.large_u().to_vec();
                 let next = ver.overlapping(l + 1, f.small_u(), f.large_u());
-                let drop = self.is_bottom(&ver, l + 1, f.small_u(), f.large_u());
+                let drop = self.is_bottom_for(&ver, l + 1, std::slice::from_ref(&f), &next);
                 Some(Job { level: l, out_level: l + 1, inputs: vec![f], next, drop_tombstones: drop, split_files: true })
             }
         }
+    }
+
+    /// Tombstones may only be dropped if no deeper level holds data in the key range the OUTPUT will cover. That range is the
+    /// union of the input files AND the overlapping next-level files (which can extend past the inputs' own range): checking only
+    /// the inputs' range lets an old version in a deeper level resurrect a deleted key (found by the model test).
+    fn is_bottom_for(&self, ver: &Version, out_level: usize, inputs: &[Arc<FileMeta>], next: &[Arc<FileMeta>]) -> bool {
+        let all = inputs.iter().chain(next.iter());
+        let lo = all.clone().map(|f| f.small_u().to_vec()).min().unwrap_or_default();
+        let hi = all.map(|f| f.large_u().to_vec()).max().unwrap_or_default();
+        self.is_bottom(ver, out_level, &lo, &hi)
     }
 
     /// True if no level deeper than `out_level` overlaps [lo, hi].
@@ -1062,7 +1072,14 @@ impl Inner {
             let mut st = self.st.lock();
             let edits = vec![
                 Edit::DelFile { level: job.level as u32, id: f.id },
-                Edit::AddFile { level: job.out_level as u32, id: f.id, size: f.size, smallest: f.smallest.clone(), largest: f.largest.clone(), max_ts: f.max_ts },
+                Edit::AddFile {
+                    level: job.out_level as u32,
+                    id: f.id,
+                    size: f.size,
+                    smallest: f.smallest.clone(),
+                    largest: f.largest.clone(),
+                    max_ts: f.max_ts,
+                },
             ];
             self.log_edits(&mut st, &edits)?;
             let mut v = (*st.version).clone();
@@ -1161,7 +1178,14 @@ impl Inner {
             v.levels[job.out_level].retain(|x| x.id != f.id);
         }
         for o in outputs {
-            edits.push(Edit::AddFile { level: job.out_level as u32, id: o.id, size: o.size, smallest: o.smallest.clone(), largest: o.largest.clone(), max_ts: o.max_ts });
+            edits.push(Edit::AddFile {
+                level: job.out_level as u32,
+                id: o.id,
+                size: o.size,
+                smallest: o.smallest.clone(),
+                largest: o.largest.clone(),
+                max_ts: o.max_ts,
+            });
             v.levels[job.out_level].push(Arc::new(o));
         }
         v.normalize();
@@ -1222,7 +1246,7 @@ impl Inner {
         if self.opts.background {
             loop {
                 {
-                    let mut st = self.st.lock();
+                    let st = self.st.lock();
                     if let Some(e) = &st.bg_err {
                         return Err(e.clone());
                     }

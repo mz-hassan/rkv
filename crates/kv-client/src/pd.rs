@@ -1,5 +1,5 @@
 //! Placement-driver client with automatic leader failover.
-use crate::{ERR_NOT_LEADER};
+use crate::ERR_NOT_LEADER;
 use parking_lot::Mutex;
 use rkv_proto::pd_client::PdClient as Grpc;
 use rkv_proto::*;
@@ -17,7 +17,12 @@ pub struct PdClient {
 
 pub fn channel(addr: &str) -> Result<Channel, String> {
     let uri = if addr.starts_with("http") { addr.to_string() } else { format!("http://{addr}") };
-    Ok(Endpoint::from_shared(uri).map_err(|e| e.to_string())?.connect_timeout(Duration::from_secs(1)).timeout(Duration::from_secs(5)).tcp_nodelay(true).connect_lazy())
+    Ok(Endpoint::from_shared(uri)
+        .map_err(|e| e.to_string())?
+        .connect_timeout(Duration::from_secs(1))
+        .timeout(Duration::from_secs(5))
+        .tcp_nodelay(true)
+        .connect_lazy())
 }
 
 macro_rules! pd_call {

@@ -3,6 +3,7 @@
 //!   2. while `has_ready()`: `rd = ready()`; PERSIST rd (snapshot, truncation, entries,
 //!      hard state) durably; THEN send `rd.messages`; THEN apply `rd.committed`;
 //!      then call `advance(&rd)`.
+//!
 //! Persist-before-send is what makes votes and acks safe.
 use crate::log::RaftLog;
 use crate::types::*;
@@ -116,7 +117,18 @@ struct Progress {
 
 impl Progress {
     fn new(next: u64) -> Progress {
-        Progress { matched: 0, next, state: PState::Probe, paused: false, inflight: VecDeque::new(), recent_active: false, last_ack_tick: 0, read_ack: 0, snap_tick: 0, stall: 0 }
+        Progress {
+            matched: 0,
+            next,
+            state: PState::Probe,
+            paused: false,
+            inflight: VecDeque::new(),
+            recent_active: false,
+            last_ack_tick: 0,
+            read_ack: 0,
+            snap_tick: 0,
+            stall: 0,
+        }
     }
 }
 
@@ -517,8 +529,12 @@ impl Raft {
     /// Config takes effect when the entry is APPENDED (not committed).
     fn apply_conf_entry(&mut self, e: &Entry) {
         let new = match &e.data {
-            EntryData::ConfEnterJoint { voters, learners } => Membership { voters: voters.clone(), outgoing: self.membership.voters.clone(), learners: learners.clone() },
-            EntryData::ConfLeaveJoint => Membership { voters: self.membership.voters.clone(), outgoing: BTreeSet::new(), learners: self.membership.learners.clone() },
+            EntryData::ConfEnterJoint { voters, learners } => {
+                Membership { voters: voters.clone(), outgoing: self.membership.voters.clone(), learners: learners.clone() }
+            }
+            EntryData::ConfLeaveJoint => {
+                Membership { voters: self.membership.voters.clone(), outgoing: BTreeSet::new(), learners: self.membership.learners.clone() }
+            }
             EntryData::ConfSet(m) => m.clone(),
             _ => return,
         };
@@ -582,7 +598,8 @@ impl Raft {
             return None;
         }
         let lease = self.cfg.election_tick / 2;
-        let ok = |n: NodeId| n == self.id || self.prs.get(&n).map(|p| self.ticks.saturating_sub(p.last_ack_tick) <= lease && p.last_ack_tick > 0).unwrap_or(false);
+        let ok =
+            |n: NodeId| n == self.id || self.prs.get(&n).map(|p| self.ticks.saturating_sub(p.last_ack_tick) <= lease && p.last_ack_tick > 0).unwrap_or(false);
         if self.membership.quorum(&ok) {
             Some(self.commit)
         } else {
@@ -813,10 +830,8 @@ impl Raft {
                 self.leader = Some(m.from);
                 self.handle_snapshot(m.from, s);
             }
-            MsgBody::TimeoutNow => {
-                if self.promotable() {
-                    self.campaign(true, true);
-                }
+            MsgBody::TimeoutNow if self.promotable() => {
+                self.campaign(true, true);
             }
             _ => {}
         }
