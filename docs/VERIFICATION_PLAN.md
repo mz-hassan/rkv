@@ -61,3 +61,14 @@ Wing-Gong with Lowe's memoization (cache on (linearized set bitset, model state)
 - Regression test:
 - Why it matters:
 ```
+
+## Status of this plan (2026-10-22)
+
+Implemented: all invariants V-ES/LA/LM/LC/SM/MONO in `crates/invariants`; V-LIN via `crates/lincheck` in simulation and in real-process
+chaos; V-DEDUP via sessions + `NoDedup` mutant; V-BANK/V-SI via `rkv-bench txn-bank`, `txn-skew`, `rkv-chaos bank`; fuzz targets for WAL,
+SSTable, manifest, Raft messages, replicated commands, protobuf requests (smoke-run only); loom model of the write-group protocol;
+model-based proptests with crash/recovery.
+Scenario mapping: J-kill-leader/J-pause/J-partition-half/J-partition-ring/J-skew/J-rolling = `rkv-chaos register --nemesis ...`;
+J-bank = `rkv-chaos bank`; J-write-skew = `rkv-bench txn-skew`; J-coord-crash = `rkv-bench lock-recovery`;
+**J-diskfull is deferred** (needs OS-level quotas; the N1 dm-flakey run covers disk errors).
+Known gap: Figure-8 mutant not caught (BUGS_FOUND.md). Evidence numbers are produced by `make sim` / `make results`, not stated here.

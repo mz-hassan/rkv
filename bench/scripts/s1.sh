@@ -4,12 +4,13 @@ source "$(dirname "$0")/lib.sh"; need rkv-bench; banner S1
 R=$(pick 3000 10000000); O=$(pick 3000 5000000); T=$(pick 2 8)
 backends="rkv"; [ "${RKV_ROCKS:-0}" = 1 ] && backends="rkv rocksdb"
 for be in $backends; do
+  B=$BIN/rkv-bench; [ "$be" = rocksdb ] && B=$BIN/rkv-bench-rocksdb   # built by `make build-baselines`
   for w in a b c d e f; do
-    run $BIN/rkv-bench engine --backend $be --id S1-ycsb-$w-$be --workload $w --records $R --ops $O --threads $T --sync group --out $OUT
+    run $B engine --backend $be --id S1-ycsb-$w-$be --workload $w --records $R --ops $O --threads $T --sync group --out $OUT
   done
   # fsync policy trade-off (workload A)
   for sync in always group interval=100 never; do
-    run $BIN/rkv-bench engine --backend $be --id S1-fsync-${sync%%=*}-$be --workload a --records $R --ops $(pick 3000 500000) --threads $T --sync $sync --out $OUT
+    run $B engine --backend $be --id S1-fsync-${sync%%=*}-$be --workload a --records $R --ops $(pick 3000 500000) --threads $T --sync $sync --out $OUT
   done
 done
 # block cache size vs hit ratio (read-only, zipfian)

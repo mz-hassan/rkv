@@ -6,7 +6,7 @@ SEEDS ?= 2000
 SECS ?= 600
 SCALE ?= full
 
-.PHONY: bench-soak help build test test-loom sim fuzz bench-local chaos cluster-up cluster-down smoke results resume lint fmt env bench-s1 bench-s2 bench-r1 bench-r2 bench-r3 bench-d1 bench-d2 bench-k1 bench-n1 bench-etcd clean dry-run
+.PHONY: build-baselines bench-soak help build test test-loom sim fuzz bench-local chaos cluster-up cluster-down smoke results resume lint fmt env bench-s1 bench-s2 bench-r1 bench-r2 bench-r3 bench-d1 bench-d2 bench-k1 bench-n1 bench-etcd clean dry-run
 
 help: ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -16,6 +16,10 @@ env: ## check toolchain, print install commands for what is missing
 
 build: ## build all binaries (release)
 	cargo build --release --workspace
+
+build-baselines: ## build the RocksDB baseline bench (compiles C++ RocksDB: slow, run once) -> target/release/rkv-bench-rocksdb
+	cargo build --release -p ycsb --features rocksdb-baseline --target-dir target/baselines
+	cp target/baselines/release/rkv-bench target/release/rkv-bench-rocksdb
 
 test: ## unit, property, model and integration tests (no cluster benchmarks)
 	cargo test --workspace --release

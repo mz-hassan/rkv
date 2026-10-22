@@ -13,7 +13,7 @@ done
 run $BIN/rkv-sim --seeds 0..$(pick 30 1000) --profile partition --duration 15000 --voters 5 --jobs ${JOBS:-4} --bug commit-minority --out $OUT/sim-mutants || true
 run cargo test --release -p lincheck
 # real processes
-N=$(pick 1 200)
+N=${HISTORIES:-$(pick 1 30)}   # 30 histories x 7 nemeses x 30 s ~ 2 h; HISTORIES=200 for the full target (~14 h)
 for nem in kill-leader pause partition-half ring rolling mixed skew; do
   for s in $(seq 1 $N); do
     run $BIN/rkv-chaos register --nemesis $nem --secs $(pick 8 30) --clients 8 --seed $s --id J-$nem-seed$s --out $OUT

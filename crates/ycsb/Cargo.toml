@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
+default = ["etcd-baseline"]
 # RocksDB baseline for S1 (compiles C++ RocksDB: slow first build)
 rocksdb-baseline = ["dep:rocksdb"]
 # etcd baseline for R1 (needs a running etcd; see bench/scripts/etcd_baseline.sh)

@@ -44,3 +44,8 @@ rustup toolchain install nightly  # needed by cargo-fuzz and miri
 | real multi-VM network | **L2 deferred**; localhost numbers labelled "localhost" |
 
 Note: macOS `fsync` does not flush the drive cache; durable flush needs `fcntl(F_FULLFSYNC)`. The engine's fsync policy must use `F_FULLFSYNC` for "strict" and benchmarks must label which was used.
+
+## Update after the build (2026-10-22)
+Installed during the build: rustup/rustc 1.99.1 (+clippy, rustfmt, llvm-tools), nightly (minimal) + cargo-fuzz 0.13, protobuf 36.2,
+etcd, kubectl, kind, docker CLI + docker-compose + colima (no daemon started), kubeconform, opentofu, a project `.venv` with matplotlib.
+Not installed/available: a running Docker daemon, Go.
