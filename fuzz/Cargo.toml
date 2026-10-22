@@ -1,0 +1,55 @@
+[package]
+name = "rkv-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kv-engine = { path = "../crates/kv-engine" }
+raft = { path = "../crates/raft" }
+txn = { path = "../crates/txn" }
+kv-server = { path = "../crates/kv-server" }
+prost = "0.13"
+rkv-proto = { path = "../crates/rkv-proto" }
+
+[workspace]
+
+[[bin]]
+name = "wal_reader"
+path = "fuzz_targets/wal_reader.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "sstable_reader"
+path = "fuzz_targets/sstable_reader.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "manifest_decoder"
+path = "fuzz_targets/manifest_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "raft_message"
+path = "fuzz_targets/raft_message.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "repl_command"
+path = "fuzz_targets/repl_command.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "proto_requests"
+path = "fuzz_targets/proto_requests.rs"
+test = false
+doc = false

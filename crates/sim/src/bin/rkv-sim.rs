@@ -75,6 +75,7 @@ fn main() {
     });
     let out_dir = arg(&args, "--out");
     let do_min = args.iter().any(|a| a == "--minimize");
+    let voters: u64 = arg(&args, "--voters").map(|s| s.parse().unwrap()).unwrap_or(3);
 
     let next = Arc::new(AtomicU64::new(lo));
     let failures: Arc<Mutex<Vec<(u64, Vec<String>, String)>>> = Arc::new(Mutex::new(vec![]));
@@ -95,6 +96,7 @@ fn main() {
             let mut cfg = SimConfig::new(seed, profile);
             cfg.duration_ms = duration;
             cfg.bug = bug;
+            cfg.initial_voters = voters;
             let r = run_seed(cfg.clone());
             ran.fetch_add(1, Ordering::Relaxed);
             virtual_ms.fetch_add(duration + 6000, Ordering::Relaxed);

@@ -9,6 +9,7 @@
 //!   members RANGE --voters 1,2,3 [--learners 4]
 //!   transfer-leader RANGE STORE
 //!   split RANGE [KEY]                 split a range (omitted key = median)
+//!   presplit KEY [KEY ...]            split at each key (finds the range that contains it)
 //!   tso | pd-config KEY VALUE | pd-ranges
 //!   faults STORE_ADDR [--block 1,2] [--drop-pct N] [--delay-ms N] [--clock-pct N]
 use ::kv_client::raw::ReadConsistency;
@@ -176,6 +177,37 @@ async fn main() {
                     }
                 }
                 return Err("split failed on every store (is the key valid / leader reachable?)".into());
+            }
+            "presplit" => {
+                let c = raw();
+                for k in &a {
+                    let info = c.router.locate(k.as_bytes()).await.map_err(|e| e.to_string())?;
+                    if info.start == k.as_bytes() {
+                        continue; // already a boundary
+                    }
+                    let mut done = false;
+                    // a freshly split child may not have elected a leader yet: retry for a few seconds
+                    for _attempt in 0..20 {
+                        for addr in all_store_addrs(&pd, &seeds).await? {
+                            let r = AdminClient::new(::kv_client::pd::channel(&addr)?).split_range(SplitReq { range_id: info.id, split_key: k.as_bytes().to_vec() }).await.map_err(|e| e.to_string())?.into_inner();
+                            if r.error.is_none() {
+                                done = true;
+                                break;
+                            }
+                        }
+                        if done {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        c.router.refresh_all().await.map_err(|e| e.to_string())?;
+                    }
+                    if !done {
+                        return Err(format!("could not split at {k}"));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await; // let the child group elect
+                    c.router.refresh_all().await.map_err(|e| e.to_string())?;
+                }
+                println!("presplit done");
             }
             "tso" => println!("{}", pd.clone().ok_or("needs --pd")?.tso_fresh().await?),
             "pd-config" => {

@@ -392,7 +392,13 @@ impl Sim {
 
     /// Process all outputs of a node's Raft instance.
     fn drive(&mut self, id: u64) {
+        let mut spins = 0u32;
         loop {
+            spins += 1;
+            if spins > 100_000 {
+                self.extra_violations.push(format!("node {id}: driver livelock (has_ready never settled)"));
+                return;
+            }
             let rd = {
                 let n = self.nodes.get_mut(&id).unwrap();
                 if !n.up {
@@ -815,6 +821,20 @@ impl Sim {
             let ev = self.queue.remove(&(t, k)).unwrap();
             self.now = t;
             self.stats.events += 1;
+            if std::env::var("RKV_SIM_TRACE").is_ok() && self.stats.events % 200_000 == 0 {
+                eprintln!("[sim trace] events={} now={} queue={} msgs_sent={}", self.stats.events, self.now, self.queue.len(), self.stats.msgs_sent);
+            }
+            // fail fast: once a safety invariant is broken the run is already a counterexample, and a
+            // broken protocol can degenerate into a message storm
+            if self.stats.events % 1024 == 0 {
+                if !self.inv.violations.is_empty() || !self.extra_violations.is_empty() {
+                    break;
+                }
+                if self.queue.len() > 500_000 {
+                    self.extra_violations.push(format!("message storm: {} queued events at t={}ms (protocol livelock)", self.queue.len(), self.now));
+                    break;
+                }
+            }
             match ev {
                 Ev::Tick { node, inc } => {
                     let Some(nd) = self.nodes.get_mut(&node) else { continue };

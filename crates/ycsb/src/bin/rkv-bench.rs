@@ -2,6 +2,7 @@
 //!   engine            S1: single-node engine YCSB (+ optional RocksDB baseline with --features rocksdb-baseline)
 //!   s2-sim            S2: crash consistency under simulated power loss (MemFs: unsynced data lost/torn)
 //!   s2-driver         S2: crash consistency under real kill -9 (spawns s2-writer children)
+//!   recovery          S1: engine recovery time vs WAL size (kill without flush, reopen, replay)
 //!   cluster           R1/D1: YCSB against a running cluster through the client library
 //!   txn-bank          D2: bank transfers with Zipfian contention (conservation audited)
 //!   txn-skew          D2: write-skew detection, snapshot vs serializable
@@ -53,6 +54,12 @@ fn parse_sync(s: &str) -> SyncPolicy {
 trait SyncKv: Send + Sync {
     fn get(&self, k: &[u8]) -> bool;
     fn put(&self, k: &[u8], v: &[u8]);
+    /// bulk load: many puts under one durability point
+    fn put_batch(&self, kvs: &[(Vec<u8>, Vec<u8>)]) {
+        for (k, v) in kvs {
+            self.put(k, v);
+        }
+    }
     fn scan(&self, k: &[u8], n: usize) -> usize;
     fn settle(&self);
     fn stats(&self) -> Value;
@@ -71,6 +78,13 @@ impl SyncKv for RkvKv {
     }
     fn put(&self, k: &[u8], v: &[u8]) {
         self.db.put(k, v).unwrap()
+    }
+    fn put_batch(&self, kvs: &[(Vec<u8>, Vec<u8>)]) {
+        let mut b = kv_engine::WriteBatch::new();
+        for (k, v) in kvs {
+            b.put(k, v);
+        }
+        self.db.write(b).unwrap();
     }
     fn scan(&self, k: &[u8], n: usize) -> usize {
         self.db.scan(k, &[], n).unwrap().len()
@@ -192,8 +206,9 @@ fn run_engine(a: &Args) {
             s.spawn(move || {
                 let lo = t * per;
                 let hi = if t == threads as u64 - 1 { records } else { lo + per };
-                for i in lo..hi {
-                    kv.put(&key_for(i), &value_for(i, vsize));
+                for chunk in (lo..hi).collect::<Vec<_>>().chunks(200) {
+                    let batch: Vec<(Vec<u8>, Vec<u8>)> = chunk.iter().map(|i| (key_for(*i), value_for(*i, vsize))).collect();
+                    kv.put_batch(&batch);
                 }
             });
         }
@@ -298,6 +313,31 @@ fn exec_phase(kv: &Arc<dyn SyncKv>, gen: &Arc<OpGen>, threads: usize, ops: u64, 
         }
     }
     (merged, total)
+}
+
+fn run_recovery(a: &Args) {
+    let mb = a.u("--mb", 64);
+    let dir = a.s("--dir", &format!("/tmp/rkv-recovery-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // memtable big enough that nothing is flushed: the whole dataset lives in the WAL
+    let opts = Options { memtable_size: (mb as usize + 64) << 20, sync: SyncPolicy::Never, ..Options::default() };
+    let db = Db::open(opts.clone(), OsFs::new_arc(false), &dir).unwrap();
+    let n = mb * 1024 * 1024 / 148;
+    for i in 0..n {
+        db.put(&key_for(i), &value_for(i, 128)).unwrap();
+    }
+    db.sync_wal().unwrap();
+    let wal_bytes: u64 = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".wal")).map(|e| e.metadata().map(|m| m.len()).unwrap_or(0)).sum();
+    std::mem::forget(db); // emulate a crash: no flush, no clean close
+    let t = Instant::now();
+    let db2 = Db::open(Options { background: false, ..opts }, OsFs::new_arc(false), &dir).unwrap();
+    let secs = t.elapsed().as_secs_f64();
+    let ok = db2.get(&key_for(n - 1)).unwrap().is_some() && db2.get(&key_for(0)).unwrap().is_some();
+    let body = json!({ "bench": "engine-recovery", "config": { "target_mb": mb }, "results": { "records": n, "wal_bytes": wal_bytes, "recovery_secs": secs, "data_intact": ok } });
+    let labels = json!({ "scope": "single node, local disk", "faults": "process abandoned without flush (WAL replay path); not a power-loss test" });
+    println!("{}", write_result(&a.s("--out", "bench/results"), &a.s("--id", &format!("S1-recovery-{mb}mb")), body, labels).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ------------------------------------------------------------------ S2: crash consistency
@@ -439,6 +479,49 @@ fn read_consistency(s: &str) -> kv_client::raw::ReadConsistency {
     }
 }
 
+/// Client abstraction so the same workload can target rkv or an etcd baseline.
+enum Be {
+    Rkv(kv_client::RawClient),
+    #[cfg(feature = "etcd-baseline")]
+    Etcd(etcd_client::Client),
+}
+
+impl Be {
+    async fn put(&self, k: &[u8], v: &[u8]) -> Result<(), String> {
+        match self {
+            Be::Rkv(c) => c.put(k, v).await.map_err(|e| e.to_string()),
+            #[cfg(feature = "etcd-baseline")]
+            Be::Etcd(c) => c.clone().put(k, v, None).await.map(|_| ()).map_err(|e| e.to_string()),
+        }
+    }
+    async fn get(&self, k: &[u8], rc: kv_client::raw::ReadConsistency) -> Result<(), String> {
+        match self {
+            Be::Rkv(c) => c.get_with(k, rc).await.map(|_| ()).map_err(|e| e.to_string()),
+            #[cfg(feature = "etcd-baseline")]
+            Be::Etcd(c) => c.clone().get(k, None).await.map(|_| ()).map_err(|e| e.to_string()), // linearizable by default
+        }
+    }
+    async fn scan(&self, k: &[u8], n: usize) -> Result<(), String> {
+        match self {
+            Be::Rkv(c) => c.scan(k, &[], n).await.map(|_| ()).map_err(|e| e.to_string()),
+            #[cfg(feature = "etcd-baseline")]
+            Be::Etcd(c) => c.clone().get(k, Some(etcd_client::GetOptions::new().with_from_key().with_limit(n as i64))).await.map(|_| ()).map_err(|e| e.to_string()),
+        }
+    }
+}
+
+async fn make_be(backend: &str, endpoints: &[String], router: &Arc<kv_client::Router>) -> Be {
+    match backend {
+        #[cfg(feature = "etcd-baseline")]
+        "etcd" => Be::Etcd(etcd_client::Client::connect(endpoints, None).await.expect("connect to etcd")),
+        "rkv" => Be::Rkv(kv_client::RawClient::with_router(router.clone())),
+        other => {
+            let _ = endpoints;
+            panic!("backend {other} not available in this build (rebuild with the matching cargo feature)")
+        }
+    }
+}
+
 async fn run_cluster(a: &Args) {
     let (pd, seeds) = clients(a);
     let wl = Workload::by_name(a.s("--workload", "a").chars().next().unwrap()).expect("workload a-f");
@@ -449,12 +532,14 @@ async fn run_cluster(a: &Args) {
     let vsize = a.u("--value-size", 128) as usize;
     let rc = read_consistency(&a.s("--read-mode", "linearizable"));
     let router = kv_client::Router::new(pd.clone(), seeds.clone());
+    let backend = a.s("--backend", "rkv");
+    let etcd_eps: Vec<String> = a.get("--etcd-endpoints").map(|s| s.split(',').map(|x| x.to_string()).collect()).unwrap_or_default();
     // load
     let t0 = Instant::now();
     let per = records / nclients as u64;
     let mut hs = vec![];
     for t in 0..nclients as u64 {
-        let c = kv_client::RawClient::with_router(router.clone());
+        let c = make_be(&backend, &etcd_eps, &router).await;
         hs.push(tokio::spawn(async move {
             let (lo, hi) = (t * per, if t == nclients as u64 - 1 { records } else { t * per + per });
             for i in lo..hi {
@@ -471,10 +556,12 @@ async fn run_cluster(a: &Args) {
     let errors = Arc::new(AtomicU64::new(0));
     let deadline = if secs > 0 { Some(Instant::now() + Duration::from_secs(secs)) } else { None };
     let t1 = Instant::now();
+    let timeline: Arc<std::sync::Mutex<BTreeMap<u64, (u64, u64, u64)>>> = Arc::new(std::sync::Mutex::new(BTreeMap::new())); // sec -> (ok, errors, max_us)
+    let want_timeline = a.flag("--timeline");
     let mut hs = vec![];
     for t in 0..nclients {
-        let (gen, done, errors) = (gen.clone(), done.clone(), errors.clone());
-        let c = kv_client::RawClient::with_router(router.clone());
+        let (gen, done, errors, timeline) = (gen.clone(), done.clone(), errors.clone(), timeline.clone());
+        let c = make_be(&backend, &etcd_eps, &router).await;
         hs.push(tokio::spawn(async move {
             let mut rng = ChaCha8Rng::seed_from_u64(t as u64 + 99);
             let mut h: BTreeMap<&'static str, Hist> = BTreeMap::new();
@@ -490,10 +577,10 @@ async fn run_cluster(a: &Args) {
                 let kind = op.kind();
                 let s = Instant::now();
                 let r = match op {
-                    Op::Read(k) => c.get_with(&k, rc).await.map(|_| ()),
+                    Op::Read(k) => c.get(&k, rc).await,
                     Op::Update(k, v) | Op::Insert(k, v) => c.put(&k, &v).await,
-                    Op::Scan(k, n) => c.scan(&k, &[], n).await.map(|_| ()),
-                    Op::Rmw(k, v) => match c.get(&k).await {
+                    Op::Scan(k, n) => c.scan(&k, n).await,
+                    Op::Rmw(k, v) => match c.get(&k, rc).await {
                         Ok(_) => c.put(&k, &v).await,
                         Err(e) => Err(e),
                     },
@@ -502,6 +589,13 @@ async fn run_cluster(a: &Args) {
                     errors.fetch_add(1, Ordering::Relaxed);
                 } else {
                     h.entry(kind).or_default().record_us(s.elapsed().as_micros() as u64);
+                }
+                if want_timeline {
+                    let sec = t1.elapsed().as_secs();
+                    let mut tl = timeline.lock().unwrap();
+                    let e = tl.entry(sec).or_insert((0, 0, 0));
+                    if r.is_err() { e.1 += 1 } else { e.0 += 1 }
+                    e.2 = e.2.max(s.elapsed().as_micros() as u64);
                 }
             }
             h
@@ -522,8 +616,9 @@ async fn run_cluster(a: &Args) {
     }
     let body = json!({
         "bench": "cluster-ycsb",
-        "config": { "workload": wl.name.to_string(), "records": records, "clients": nclients, "value_size": vsize, "read_mode": a.s("--read-mode", "linearizable"), "pd": a.get("--pd"), "seeds": seeds, "cluster_label": a.s("--cluster-label", "unlabeled") },
-        "results": { "load_secs": load_secs, "run_secs": run_secs, "ok_ops": all.count, "errors": errors.load(Ordering::Relaxed), "ops_per_sec": all.count as f64 / run_secs, "latency_all": all.to_json(), "latency_by_op": by, "client_retries": router.retries.load(Ordering::Relaxed) },
+        "config": { "workload": wl.name.to_string(), "records": records, "clients": nclients, "value_size": vsize, "read_mode": a.s("--read-mode", "linearizable"), "backend": a.s("--backend", "rkv"), "pd": a.get("--pd"), "seeds": seeds, "cluster_label": a.s("--cluster-label", "unlabeled") },
+        "results": { "load_secs": load_secs, "run_secs": run_secs, "ok_ops": all.count, "errors": errors.load(Ordering::Relaxed), "ops_per_sec": all.count as f64 / run_secs, "latency_all": all.to_json(), "latency_by_op": by, "client_retries": router.retries.load(Ordering::Relaxed),
+            "timeline": timeline.lock().unwrap().iter().map(|(s, (ok, er, mx))| json!({"sec": s, "ok": ok, "errors": er, "max_latency_us": mx})).collect::<Vec<_>>() },
     });
     let labels = json!({ "scope": a.s("--scope-label", "localhost multi-process cluster (all nodes on one machine, shared CPU/disk, no network latency)"), "faults": a.s("--fault-label", "none"), "clients": "closed loop; no coordinated-omission correction" });
     println!("{}", write_result(&a.s("--out", "bench/results"), &a.s("--id", "R1"), body, labels).unwrap());
@@ -760,6 +855,7 @@ fn main() {
     let rt = || tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     match sub.as_str() {
         "engine" => run_engine(&a),
+        "recovery" => run_recovery(&a),
         "s2-sim" => run_s2_sim(&a),
         "s2-writer" => run_s2_writer(&a),
         "s2-driver" => run_s2_driver(&a),

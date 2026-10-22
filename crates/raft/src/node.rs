@@ -1066,7 +1066,8 @@ impl Raft {
             || self.to_install.is_some()
             || self.to_save.is_some()
             || !self.read_states.is_empty()
-            || self.commit > self.applied_cursor
+            // only if there is actually something to hand out (a corrupted log must not make us spin)
+            || (self.commit > self.applied_cursor && self.log.get(self.applied_cursor + 1).is_some())
     }
 
     pub fn ready(&mut self) -> Ready {

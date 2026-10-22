@@ -97,11 +97,15 @@ pub struct GroupOptions {
     pub max_uncommitted: u64,
     /// logical clock speed in percent (100 = nominal); chaos tests change it to emulate clock skew
     pub clock_rate: Arc<AtomicU64>,
+    /// entries per Append message (1 disables batching)
+    pub max_msg_entries: usize,
+    /// in-flight Append messages per follower (1 disables pipelining)
+    pub max_inflight: usize,
 }
 
 impl Default for GroupOptions {
     fn default() -> Self {
-        GroupOptions { tick_ms: 20, election_tick: 10, heartbeat_tick: 2, pre_vote: true, check_quorum: true, snapshot_threshold: 20_000, sync: true, inbox: 4096, lease_reads: false, max_uncommitted: 4096, clock_rate: Arc::new(AtomicU64::new(100)) }
+        GroupOptions { tick_ms: 20, election_tick: 10, heartbeat_tick: 2, pre_vote: true, check_quorum: true, snapshot_threshold: 20_000, sync: true, inbox: 4096, lease_reads: false, max_uncommitted: 4096, clock_rate: Arc::new(AtomicU64::new(100)), max_msg_entries: 64, max_inflight: 32 }
     }
 }
 
@@ -173,6 +177,8 @@ pub fn spawn_group(
     cfg.pre_vote = opts.pre_vote;
     cfg.check_quorum = opts.check_quorum;
     cfg.max_uncommitted = opts.max_uncommitted;
+    cfg.max_msg_entries = opts.max_msg_entries;
+    cfg.max_inflight = opts.max_inflight;
     cfg.seed = id.wrapping_mul(0x9E37) ^ group.wrapping_mul(0x85EB) ^ std::process::id() as u64;
     let raft = Raft::new(cfg, initial, init);
     let (tx, rx) = mpsc::channel(opts.inbox);

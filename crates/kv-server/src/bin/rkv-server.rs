@@ -42,6 +42,12 @@ async fn main() {
     if let Some(s) = arg(&a, "--snapshot-threshold") {
         cfg.group.snapshot_threshold = s.parse().unwrap();
     }
+    if let Some(s) = arg(&a, "--max-msg-entries") {
+        cfg.group.max_msg_entries = s.parse().unwrap();
+    }
+    if let Some(s) = arg(&a, "--max-inflight") {
+        cfg.group.max_inflight = s.parse().unwrap();
+    }
     cfg.group.sync = !a.iter().any(|x| x == "--no-raft-fsync");
     cfg.group.pre_vote = !a.iter().any(|x| x == "--no-prevote");
     cfg.group.check_quorum = !a.iter().any(|x| x == "--no-check-quorum");

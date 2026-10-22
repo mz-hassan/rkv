@@ -159,6 +159,13 @@ impl SstReader {
         if n(5) != MAGIC {
             return Err(corrupt("bad sst magic"));
         }
+        // never trust lengths from disk: they must lie inside the file (also bounds allocations)
+        let body = size - FOOTER as u64;
+        for (off, len) in [(n(0), n(1)), (n(2), n(3))] {
+            if off.checked_add(len).map(|e| e > body).unwrap_or(true) || len < 4 {
+                return Err(corrupt("sst block handle out of bounds"));
+            }
+        }
         let filter_raw = f.read_at(n(0), n(1) as usize)?;
         let filter = check_block(&filter_raw)?.to_vec();
         let index_raw = f.read_at(n(2), n(3) as usize)?;
@@ -166,9 +173,16 @@ impl SstReader {
         let index = ents
             .into_iter()
             .map(|e| {
-                (e.ikey, u64::from_le_bytes(e.value[0..8].try_into().unwrap()), u64::from_le_bytes(e.value[8..16].try_into().unwrap()))
+                if e.value.len() < 16 {
+                    return Err(corrupt("short index entry"));
+                }
+                let (off, sz) = (u64::from_le_bytes(e.value[0..8].try_into().unwrap()), u64::from_le_bytes(e.value[8..16].try_into().unwrap()));
+                if off.checked_add(sz).map(|x| x > body).unwrap_or(true) {
+                    return Err(corrupt("data block handle out of bounds"));
+                }
+                Ok((e.ikey, off, sz))
             })
-            .collect();
+            .collect::<io::Result<Vec<_>>>()?;
         Ok(SstReader {
             id,
             f,
@@ -329,6 +343,24 @@ mod tests {
         assert_eq!(all.len(), 1000);
         let part: Vec<_> = r.iter(b"k00010", b"k00020").collect();
         assert_eq!(part.len(), 10);
+    }
+
+    #[test]
+    fn corrupt_footer_lengths_are_rejected_without_huge_allocation() {
+        let fs = MemFs::new();
+        let v = fs.as_vfs();
+        let f = v.create("/t.sst").unwrap();
+        let mut b = SstBuilder::new(f.clone(), 256, 10);
+        for i in 0..50u32 {
+            b.add(&Entry::new(format!("k{i:05}").as_bytes(), 1, KIND_PUT, b"x")).unwrap();
+        }
+        b.finish().unwrap();
+        let mut data = f.read_at(0, f.len() as usize).unwrap();
+        let n = data.len();
+        data[n - 48 + 8..n - 48 + 16].copy_from_slice(&(u64::MAX / 2).to_le_bytes()); // filter_len = absurd
+        let f2 = v.create("/bad.sst").unwrap();
+        f2.append(&data).unwrap();
+        assert!(SstReader::open(9, f2, None).is_err());
     }
 
     #[test]

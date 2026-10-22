@@ -32,6 +32,9 @@ impl Workload {
             'd' => w('d', 0.95, 0.0, 0.05, 0.0, 0.0, Dist::Latest),
             'e' => w('e', 0.0, 0.0, 0.05, 0.95, 0.0, Dist::Zipfian),
             'f' => w('f', 0.5, 0.0, 0.0, 0.0, 0.5, Dist::Zipfian),
+            // not part of YCSB: 100% updates / 100% reads on uniform keys, for replication benchmarks
+            'w' => w('w', 0.0, 1.0, 0.0, 0.0, 0.0, Dist::Uniform),
+            'r' => w('r', 1.0, 0.0, 0.0, 0.0, 0.0, Dist::Uniform),
             _ => return None,
         })
     }

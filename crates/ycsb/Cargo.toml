@@ -6,6 +6,8 @@ edition.workspace = true
 [features]
 # RocksDB baseline for S1 (compiles C++ RocksDB: slow first build)
 rocksdb-baseline = ["dep:rocksdb"]
+# etcd baseline for R1 (needs a running etcd; see bench/scripts/etcd_baseline.sh)
+etcd-baseline = ["dep:etcd-client"]
 
 [lib]
 name = "ycsb"
@@ -23,3 +25,4 @@ rand = "0.8"
 rand_chacha = "0.3"
 serde_json = "1"
 rocksdb = { version = "0.22", optional = true, default-features = false, features = ["lz4"] }
+etcd-client = { version = "0.14", optional = true }
