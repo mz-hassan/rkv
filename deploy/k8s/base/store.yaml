@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: rkv-store, namespace: rkv }
+spec:
+  serviceName: rkv-store
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy: { type: RollingUpdate }     # the operator drives `partition` for controlled rolling upgrades
+  selector: { matchLabels: { app: rkv-store } }
+  template:
+    metadata: { labels: { app: rkv-store } }
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: store
+          image: rkv:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: RKV_ROLE, value: store }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: RKV_NAMESPACE_SUFFIX, value: ".rkv.svc.cluster.local" }
+            - { name: RKV_PD_ENDPOINTS, value: "rkv-pd-0.rkv-pd.rkv.svc.cluster.local:2379,rkv-pd-1.rkv-pd.rkv.svc.cluster.local:2379,rkv-pd-2.rkv-pd.rkv.svc.cluster.local:2379" }
+          ports: [{ containerPort: 20160, name: grpc }, { containerPort: 20180, name: http }]
+          readinessProbe: { httpGet: { path: /readyz, port: 20180 }, periodSeconds: 3, failureThreshold: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: 20180 }, periodSeconds: 10, failureThreshold: 6, initialDelaySeconds: 10 }
+          volumeMounts: [{ name: data, mountPath: /data }]
+          resources: { requests: { cpu: 250m, memory: 256Mi }, limits: { memory: 1Gi } }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 5Gi } } }

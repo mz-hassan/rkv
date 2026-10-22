@@ -1,0 +1,7 @@
+# Upgrade:   kubectl -n rkv patch rkvcluster demo --type merge -p '{"spec":{"image":"rkv:v2"}}'
+# Scale out: kubectl -n rkv patch rkvcluster demo --type merge -p '{"spec":{"storeReplicas":5}}'
+# Scale in:  kubectl -n rkv patch rkvcluster demo --type merge -p '{"spec":{"storeReplicas":3}}'
+apiVersion: rkv.io/v1alpha1
+kind: RkvCluster
+metadata: { name: demo, namespace: rkv }
+spec: { image: "rkv:dev", storeReplicas: 3, replication: 3 }

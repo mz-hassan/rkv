@@ -1,0 +1,5 @@
+global: { scrape_interval: 5s }
+scrape_configs:
+  - job_name: rkv-store
+    static_configs:
+      - targets: ["s1:20180", "s2:20180", "s3:20180"]

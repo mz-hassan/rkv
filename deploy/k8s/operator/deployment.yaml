@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: rkv-operator, namespace: rkv }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: rkv-operator } }
+  template:
+    metadata: { labels: { app: rkv-operator } }
+    spec:
+      serviceAccountName: rkv-operator
+      containers:
+        - name: operator
+          image: rkv-operator:dev
+          imagePullPolicy: IfNotPresent
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }

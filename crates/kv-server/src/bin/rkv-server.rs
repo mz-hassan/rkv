@@ -1,5 +1,5 @@
 //! rkv-server --id 1 --addr 127.0.0.1:20160 --data ./data/1 --peers 1=127.0.0.1:20160,2=...,3=... [--pd host:port,...]
-//!            [--http 127.0.0.1:20180] [--fsync always|group|interval|never] [--strict-fsync] [--split-bytes N]
+//!            [--advertise HOST:PORT] [--http 127.0.0.1:20180] [--fsync always|group|interval|never] [--strict-fsync] [--split-bytes N]
 use kv_server::{http, serve, Store, StoreConfig};
 use kv_engine::SyncPolicy;
 use std::collections::BTreeMap;
@@ -14,8 +14,10 @@ async fn main() {
     let a: Vec<String> = std::env::args().collect();
     let id: u64 = arg(&a, "--id").expect("--id").parse().unwrap();
     let addr = arg(&a, "--addr").expect("--addr");
+    // address other nodes and clients should use (differs from the listen address in containers)
+    let advertise = arg(&a, "--advertise").unwrap_or_else(|| addr.clone());
     let data = arg(&a, "--data").unwrap_or_else(|| format!("./data/{id}"));
-    let mut cfg = StoreConfig::new(id, &addr, &data);
+    let mut cfg = StoreConfig::new(id, &advertise, &data);
     if let Some(p) = arg(&a, "--peers") {
         let m: BTreeMap<u64, String> = p.split(',').filter_map(|x| x.split_once('=')).map(|(k, v)| (k.parse().unwrap(), v.to_string())).collect();
         cfg.static_peers = m;

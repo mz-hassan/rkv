@@ -477,6 +477,8 @@ impl Pd {
         let hot_wq = self.cfg_u64("hot_write_qps", 0);
         let max_ops = self.cfg_u64("max_concurrent_ops", 4) as usize;
         let balance = self.cfg_u64("balance", 1) == 1;
+        // drain a store (used by the operator before scale-in): treated like a dead store so replicas move away
+        let evict = self.cfg_u64("evict_store", 0);
         let now = now_ms();
         let mut m = self.mem.lock();
         {
@@ -484,7 +486,7 @@ impl Pd {
             let sigs: HashMap<u64, (Vec<(u64, bool)>, u64)> = m.ranges.values().map(|e| (e.info.id, (peer_sig(&e.info), e.info.version))).collect();
             m.pending.retain(|rid, (_, since, sig, ver)| now.saturating_sub(*since) < 20_000 && sigs.get(rid).map(|(s, v)| s == sig && v == ver).unwrap_or(true));
         }
-        let alive: Vec<u64> = m.stores.iter().filter(|(_, s)| now.saturating_sub(s.last_seen_ms) < STORE_DEAD_MS).map(|(id, _)| *id).collect();
+        let alive: Vec<u64> = m.stores.iter().filter(|(id, s)| now.saturating_sub(s.last_seen_ms) < STORE_DEAD_MS && **id != evict).map(|(id, _)| *id).collect();
         let is_alive = |id: u64| alive.contains(&id);
         // replica counts per store (from the routing table)
         let mut counts: HashMap<u64, usize> = alive.iter().map(|s| (*s, 0)).collect();
@@ -521,6 +523,14 @@ impl Pd {
             }
             if !learners.is_empty() {
                 continue; // wait for learners to catch up
+            }
+            // 1b. leader sits on the store being drained: hand leadership to a healthy voter first
+            if evict != 0 && leader == evict {
+                if let Some(t) = voters.iter().find(|p| p.store_id != evict && is_alive(p.store_id)) {
+                    new_cmds.push(cmd(4, t.store_id, vec![]));
+                    new_pending.push((rid, 4));
+                    continue;
+                }
             }
             // 2. too few live replicas: add one on the least loaded store that doesn't have the range
             if alive_voters < replication {

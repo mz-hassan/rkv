@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: rkv-store, namespace: rkv }
+spec: { maxUnavailable: 1, selector: { matchLabels: { app: rkv-store } } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: rkv-pd, namespace: rkv }
+spec: { maxUnavailable: 1, selector: { matchLabels: { app: rkv-pd } } }

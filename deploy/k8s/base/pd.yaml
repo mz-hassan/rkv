@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: rkv-pd, namespace: rkv }
+spec:
+  serviceName: rkv-pd
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector: { matchLabels: { app: rkv-pd } }
+  template:
+    metadata: { labels: { app: rkv-pd } }
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: pd
+          image: rkv:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: RKV_ROLE, value: pd }
+            - { name: POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: RKV_PD_PEERS, value: "1=rkv-pd-0.rkv-pd.rkv.svc.cluster.local:2379,2=rkv-pd-1.rkv-pd.rkv.svc.cluster.local:2379,3=rkv-pd-2.rkv-pd.rkv.svc.cluster.local:2379" }
+          ports: [{ containerPort: 2379, name: grpc }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 512Mi } }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 1Gi } } }

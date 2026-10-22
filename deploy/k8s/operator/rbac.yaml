@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: rkv-operator, namespace: rkv }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: rkv-operator, namespace: rkv }
+rules:
+  - { apiGroups: ["rkv.io"], resources: ["rkvclusters", "rkvclusters/status"], verbs: ["get", "list", "watch", "patch", "update"] }
+  - { apiGroups: ["apps"], resources: ["statefulsets"], verbs: ["get", "list", "watch", "patch", "update"] }
+  - { apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: rkv-operator, namespace: rkv }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: rkv-operator }
+subjects: [{ kind: ServiceAccount, name: rkv-operator, namespace: rkv }]
+---
+# cluster-scoped: the controller watches RkvCluster across namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: rkv-operator-watch }
+rules:
+  - { apiGroups: ["rkv.io"], resources: ["rkvclusters"], verbs: ["get", "list", "watch"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: rkv-operator-watch }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: rkv-operator-watch }
+subjects: [{ kind: ServiceAccount, name: rkv-operator, namespace: rkv }]

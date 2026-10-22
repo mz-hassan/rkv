@@ -1,0 +1,42 @@
+# 3 PD + 3 store cluster with Prometheus and Grafana.
+#   docker build -t rkv:dev -f deploy/docker/Dockerfile .      (repo root)
+#   docker compose -f deploy/docker/docker-compose.yml up -d
+#   docker compose -f deploy/docker/docker-compose.yml exec s1 kvctl --pd pd1:2379 status
+# Grafana: http://localhost:3000 (admin/admin) - dashboard "rkv"; Prometheus: http://localhost:9090
+x-store: &store
+  image: rkv:dev
+  environment: &store-env
+    RKV_ROLE: store
+    RKV_PD_ENDPOINTS: pd1:2379,pd2:2379,pd3:2379
+    RKV_NAMESPACE_SUFFIX: ""
+  depends_on: [pd1, pd2, pd3]
+  restart: unless-stopped
+
+x-pd: &pd
+  image: rkv:dev
+  environment: &pd-env
+    RKV_ROLE: pd
+    RKV_PD_PEERS: "1=pd1:2379,2=pd2:2379,3=pd3:2379"
+  restart: unless-stopped
+
+services:
+  pd1: { <<: *pd, hostname: pd-0, container_name: rkv-pd1, environment: { <<: *pd-env, POD_NAME: pd-0 }, volumes: [pd1:/data] }
+  pd2: { <<: *pd, hostname: pd-1, container_name: rkv-pd2, environment: { <<: *pd-env, POD_NAME: pd-1 }, volumes: [pd2:/data] }
+  pd3: { <<: *pd, hostname: pd-2, container_name: rkv-pd3, environment: { <<: *pd-env, POD_NAME: pd-2 }, volumes: [pd3:/data] }
+  s1:  { <<: *store, hostname: s1, container_name: rkv-s1, environment: { <<: *store-env, POD_NAME: s-0, RKV_STORE_SERVICE: s1 }, volumes: [s1:/data], ports: ["20161:20160", "20181:20180"] }
+  s2:  { <<: *store, hostname: s2, container_name: rkv-s2, environment: { <<: *store-env, POD_NAME: s-1, RKV_STORE_SERVICE: s2 }, volumes: [s2:/data], ports: ["20162:20160", "20182:20180"] }
+  s3:  { <<: *store, hostname: s3, container_name: rkv-s3, environment: { <<: *store-env, POD_NAME: s-2, RKV_STORE_SERVICE: s3 }, volumes: [s3:/data], ports: ["20163:20160", "20183:20180"] }
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment: { GF_SECURITY_ADMIN_PASSWORD: admin }
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes: { pd1: {}, pd2: {}, pd3: {}, s1: {}, s2: {}, s3: {} }

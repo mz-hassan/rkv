@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kv-engine", "crates/raft", "crates/raft-storage", "crates/lincheck", "crates/invariants", "crates/sim", "crates/raft-driver", "crates/rkv-proto", "crates/txn", "crates/kv-server", "crates/kv-client", "crates/pd", "crates/ycsb", "crates/kvctl", "crates/chaos"]
+members = ["crates/kv-engine", "crates/raft", "crates/raft-storage", "crates/lincheck", "crates/invariants", "crates/sim", "crates/raft-driver", "crates/rkv-proto", "crates/txn", "crates/kv-server", "crates/kv-client", "crates/pd", "crates/ycsb", "crates/kvctl", "crates/chaos", "crates/operator"]
 
 [workspace.package]
 edition = "2021"
