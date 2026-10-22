@@ -41,7 +41,17 @@ impl std::fmt::Display for TxnError {
 }
 impl std::error::Error for TxnError {}
 
+/// Where transaction timestamps come from.
+pub enum TsSource {
+    /// the placement driver's timestamp oracle: globally monotonic, strict snapshot semantics (default)
+    Pd,
+    /// a local hybrid logical clock: no PD round trip per timestamp, but snapshots are only as consistent as the clocks of the
+    /// clients are synchronised (a transaction can miss a commit that finished "just before" it began on another client)
+    Hlc(std::sync::Mutex<txn::hlc::Hlc>),
+}
+
 pub struct TxnClient {
+    pub ts_source: TsSource,
     pub router: Arc<Router>,
     pub pd: Arc<PdClient>,
     pub iso: IsolationLevel,
@@ -53,21 +63,42 @@ pub struct TxnClient {
 impl TxnClient {
     pub fn new(pd: Arc<PdClient>, seeds: Vec<String>) -> Arc<TxnClient> {
         let router = Router::new(Some(pd.clone()), seeds);
-        Arc::new(TxnClient { router, pd, iso: IsolationLevel::Snapshot, lock_ttl_ms: 3000, async_secondaries: true })
+        Arc::new(TxnClient { ts_source: TsSource::Pd, router, pd, iso: IsolationLevel::Snapshot, lock_ttl_ms: 3000, async_secondaries: true })
     }
     pub fn with_isolation(pd: Arc<PdClient>, seeds: Vec<String>, iso: IsolationLevel) -> Arc<TxnClient> {
         let router = Router::new(Some(pd.clone()), seeds);
-        Arc::new(TxnClient { router, pd, iso, lock_ttl_ms: 3000, async_secondaries: true })
+        Arc::new(TxnClient { ts_source: TsSource::Pd, router, pd, iso, lock_ttl_ms: 3000, async_secondaries: true })
+    }
+
+    /// Same as `with_isolation`, but timestamps come from a local hybrid logical clock instead of the PD oracle.
+    pub fn with_hlc(pd: Arc<PdClient>, seeds: Vec<String>, iso: IsolationLevel) -> Arc<TxnClient> {
+        let router = Router::new(Some(pd.clone()), seeds);
+        Arc::new(TxnClient {
+            ts_source: TsSource::Hlc(std::sync::Mutex::new(txn::hlc::Hlc::new())),
+            router,
+            pd,
+            iso,
+            lock_ttl_ms: 3000,
+            async_secondaries: true,
+        })
+    }
+
+    /// A timestamp allocated after this call started.
+    pub async fn fresh_ts(&self) -> Result<u64, TxnError> {
+        match &self.ts_source {
+            TsSource::Pd => self.pd.tso_fresh().await.map_err(|e| TxnError::Client(ClientError::Unavailable(e))),
+            TsSource::Hlc(h) => Ok(h.lock().unwrap().now(crate::now_ms())),
+        }
     }
 
     pub async fn begin(self: &Arc<Self>) -> Result<Txn, TxnError> {
         // fresh timestamp: the snapshot must include everything committed before begin() was called
-        let ts = self.pd.tso_fresh().await.map_err(|e| TxnError::Client(ClientError::Unavailable(e)))?;
+        let ts = self.fresh_ts().await?;
         Ok(Txn { c: self.clone(), start_ts: ts, writes: BTreeMap::new(), reads: BTreeSet::new() })
     }
 
     async fn now_ms(&self) -> Result<u64, TxnError> {
-        let ts = self.pd.tso_fresh().await.map_err(|e| TxnError::Client(ClientError::Unavailable(e)))?;
+        let ts = self.fresh_ts().await?;
         Ok(txn::percolator::physical_ms(ts))
     }
 

@@ -6,7 +6,7 @@ SEEDS ?= 2000
 SECS ?= 600
 SCALE ?= full
 
-.PHONY: help build test test-loom sim fuzz bench-local chaos cluster-up cluster-down smoke results resume lint fmt env bench-s1 bench-s2 bench-r1 bench-r2 bench-r3 bench-d1 bench-d2 bench-k1 bench-n1 bench-etcd clean dry-run
+.PHONY: bench-soak help build test test-loom sim fuzz bench-local chaos cluster-up cluster-down smoke results resume lint fmt env bench-s1 bench-s2 bench-r1 bench-r2 bench-r3 bench-d1 bench-d2 bench-k1 bench-n1 bench-etcd clean dry-run
 
 help: ## list targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -48,6 +48,8 @@ bench-d1: build ## D1 sharding: scaling with ranges, split under load, hot range
 	bash bench/scripts/d1.sh
 bench-d2: build ## D2 transactions: contention, write skew, lock recovery, bank under chaos
 	bash bench/scripts/d2.sh
+bench-soak: build ## S3 soak: RSS of all servers under sustained load (SOAK in bench/scripts/soak.sh)
+	bash bench/scripts/soak.sh
 bench-k1: ## K1 Kubernetes on kind (needs docker/colima, kind, kubectl)
 	bash bench/scripts/k1.sh
 bench-n1: ## N1 real-network runs on Linux hosts (HOSTS="h1 h2 h3"); DEFERRED
@@ -58,7 +60,7 @@ chaos: build ## real-process chaos: kill -9 / pause / partition / ring / skew + 
 	SCALE=$(SCALE) bash bench/scripts/r3.sh
 
 dry-run: ## print every command of every benchmark script without running anything
-	@for s in sim s1 s2 r1 r2 r3 d1 d2 k1 n1 etcd_baseline fuzz; do DRY_RUN=1 SCALE=smoke bash bench/scripts/$$s.sh >/dev/null && echo "dry-run ok: $$s" || echo "dry-run FAILED: $$s"; done
+	@for s in sim s1 s2 soak r1 r2 r3 d1 d2 k1 n1 etcd_baseline fuzz; do DRY_RUN=1 SCALE=smoke bash bench/scripts/$$s.sh >/dev/null && echo "dry-run ok: $$s" || echo "dry-run FAILED: $$s"; done
 
 cluster-up: build ## local 3-store cluster with a PD (see scripts/cluster.sh)
 	scripts/cluster.sh up 3 pd

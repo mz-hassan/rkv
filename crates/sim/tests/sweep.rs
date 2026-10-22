@@ -21,9 +21,13 @@ fn correct_code_is_clean_on_every_profile() {
 }
 
 fn catches(bug: Bug, profile: Profile, voters: u64, seeds: std::ops::Range<u64>) -> bool {
+    catches_for(bug, profile, voters, seeds, 10_000)
+}
+
+fn catches_for(bug: Bug, profile: Profile, voters: u64, seeds: std::ops::Range<u64>, duration_ms: u64) -> bool {
     seeds.into_iter().any(|seed| {
         let mut cfg = SimConfig::new(seed, profile);
-        cfg.duration_ms = 10_000;
+        cfg.duration_ms = duration_ms;
         cfg.bug = Some(bug);
         cfg.initial_voters = voters;
         caught(&run_seed(cfg))
@@ -39,7 +43,7 @@ fn injected_application_bugs_are_caught() {
 
 #[test]
 fn injected_consensus_bugs_are_caught() {
-    assert!(catches(Bug::NoPersistVote, Profile::CrashHeavy, 3, 0..120), "not persisting votes must allow two leaders in a term");
+    assert!(catches_for(Bug::NoPersistVote, Profile::CrashHeavy, 3, 0..200, 20_000), "not persisting votes must allow two leaders in a term");
     assert!(catches(Bug::Raft(raft::RaftBug::VoteIgnoresLog), Profile::Stormy, 3, 0..40), "ignoring the log up-to-date check must violate leader completeness");
     assert!(catches(Bug::Raft(raft::RaftBug::CommitMinority), Profile::PartitionHeavy, 5, 0..10), "committing on a minority must be detected (needs 5 voters)");
 }

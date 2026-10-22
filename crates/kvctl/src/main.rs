@@ -10,6 +10,8 @@
 //!   members RANGE --voters 1,2,3 [--learners 4]
 //!   transfer-leader RANGE STORE
 //!   split RANGE [KEY]                 split a range (omitted key = median)
+//!   lease acquire NAME OWNER TTL_MS | lease holder NAME | lease renew|release NAME OWNER TOKEN TTL_MS
+//!   merge LEFT_RANGE                  merge a range with its right neighbour (replica sets must be identical)
 //!   presplit KEY [KEY ...]            split at each key (finds the range that contains it)
 //!   tso | pd-config KEY VALUE | pd-ranges
 //!   faults STORE_ADDR [--block 1,2] [--drop-pct N] [--delay-ms N] [--clock-pct N]
@@ -212,6 +214,79 @@ async fn main() {
                     }
                 }
                 return Err("split failed on every store (is the key valid / leader reachable?)".into());
+            }
+            "lease" => {
+                let lc = ::kv_client::LeaseClient::new(std::sync::Arc::new(raw()));
+                need(2, &a);
+                let sub = a.remove(0);
+                match sub.as_str() {
+                    "acquire" => {
+                        need(3, &a);
+                        match lc.acquire(&a[0], &a[1], a[2].parse().unwrap()).await.map_err(|e| e.to_string())? {
+                            Some(l) => println!("acquired {} as {} fencing token {}", l.name, l.owner, l.token),
+                            None => println!("held by someone else"),
+                        }
+                    }
+                    "holder" => match lc.holder(&a[0]).await.map_err(|e| e.to_string())? {
+                        Some((o, t)) => println!("{o} (token {t})"),
+                        None => println!("free"),
+                    },
+                    "renew" | "release" => {
+                        need(4, &a);
+                        let l = ::kv_client::Lease { name: a[0].clone(), owner: a[1].clone(), token: a[2].parse().unwrap(), ttl_ms: a[3].parse().unwrap() };
+                        let ok = if sub == "renew" { lc.renew(&l).await } else { lc.release(&l).await }.map_err(|e| e.to_string())?;
+                        println!("{}", if ok { "ok" } else { "lease no longer held" });
+                    }
+                    _ => return Err("lease acquire|holder|renew|release".into()),
+                }
+            }
+            "merge" => {
+                need(1, &a);
+                let left: u64 = a[0].parse().unwrap();
+                let addrs = all_store_addrs(&pd, &seeds).await?;
+                // find the right neighbour from any store's view
+                let mut infos = vec![];
+                for addr in &addrs {
+                    if let Ok(r) = AdminClient::new(::kv_client::pd::channel(addr)?).status(Empty {}).await {
+                        infos.extend(r.into_inner().ranges.into_iter().filter_map(|x| x.info));
+                    }
+                }
+                let l = infos.iter().find(|i| i.id == left).ok_or("unknown left range")?.clone();
+                let right = infos.iter().find(|i| i.start == l.end && !l.end.is_empty()).ok_or("left range has no right neighbour")?.clone();
+                let call = |phase: u32, fi: u64, re: Vec<u8>| {
+                    let addrs = addrs.clone();
+                    async move {
+                        let mut last = String::from("no stores");
+                        for _attempt in 0..20 {
+                            for addr in &addrs {
+                                let ch = ::kv_client::pd::channel(addr).map_err(|e| e.to_string())?;
+                                match AdminClient::new(ch)
+                                    .merge_range(MergeReq { left_id: left, right_id: right.id, phase, final_index: fi, right_end: re.clone() })
+                                    .await
+                                {
+                                    Ok(r) => {
+                                        let r = r.into_inner();
+                                        match r.error {
+                                            None => return Ok::<_, String>(r),
+                                            Some(e) => last = format!("{} (code {})", e.msg, e.code),
+                                        }
+                                    }
+                                    Err(e) => last = e.message().to_string(),
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        Err(last)
+                    }
+                };
+                let p1 = call(1, 0, vec![]).await.map_err(|e| format!("phase 1 (freeze right range) failed: {e}"))?;
+                match call(2, p1.final_index, p1.right_end.clone()).await {
+                    Ok(_) => println!("merged range {} into {}", right.id, left),
+                    Err(e) => {
+                        let _ = call(3, 0, vec![]).await;
+                        return Err(format!("phase 2 failed ({e}); merge aborted and the right range unfrozen"));
+                    }
+                }
             }
             "presplit" => {
                 let c = raw();

@@ -8,6 +8,7 @@ for theta in 0 0.5 0.9 0.99; do
     run $BIN/rkv-bench txn-bank --pd $PD --accounts $ACC --clients $cl --theta $theta --keys-per-txn 4 --ops $OPS --id D2-bank-theta$theta-c$cl --out $OUT
   done
 done
+run $BIN/rkv-bench txn-bank --pd $PD --accounts $ACC --clients 32 --theta 0.9 --ts hlc --id D2-bank-hlc --out $OUT
 run $BIN/rkv-bench txn-bank --pd $PD --accounts $ACC --clients 32 --theta 0.9 --isolation serializable --ops $OPS --id D2-bank-serializable --out $OUT
 run $BIN/rkv-bench txn-skew --pd $PD --pairs $(pick 30 500) --id D2-write-skew --out $OUT
 run $BIN/rkv-bench lock-recovery --pd $PD --trials $(pick 5 100) --ttl-ms 500 --id D2-lock-recovery --out $OUT

@@ -664,7 +664,7 @@ async fn run_txn_bank(a: &Args) {
     let (pd, seeds) = clients(a);
     let pd = pd.expect("--pd required");
     let iso = if a.s("--isolation", "snapshot") == "serializable" { kv_client::IsolationLevel::Serializable } else { kv_client::IsolationLevel::Snapshot };
-    let tc = kv_client::TxnClient::with_isolation(pd, seeds, iso);
+    let tc = if a.s("--ts", "pd") == "hlc" { kv_client::TxnClient::with_hlc(pd, seeds, iso) } else { kv_client::TxnClient::with_isolation(pd, seeds, iso) };
     let accounts = a.u("--accounts", 1000);
     let nclients = a.u("--clients", 16) as usize;
     let theta = a.f("--theta", 0.5);
@@ -775,7 +775,7 @@ async fn run_txn_bank(a: &Args) {
     let attempts = commits.load(Ordering::Relaxed) + conflicts.load(Ordering::Relaxed) + aborted.load(Ordering::Relaxed) + other.load(Ordering::Relaxed);
     let body = json!({
         "bench": "txn-bank",
-        "config": { "accounts": accounts, "clients": nclients, "theta": theta, "keys_per_txn": keys_per, "isolation": a.s("--isolation", "snapshot") },
+        "config": { "accounts": accounts, "clients": nclients, "theta": theta, "keys_per_txn": keys_per, "isolation": a.s("--isolation", "snapshot"), "timestamps": a.s("--ts", "pd") },
         "results": {
             "load_secs": load_secs, "run_secs": run_secs, "commits": commits.load(Ordering::Relaxed), "write_conflicts": conflicts.load(Ordering::Relaxed),
             "aborted": aborted.load(Ordering::Relaxed), "other_errors": other.load(Ordering::Relaxed),

@@ -1,15 +1,17 @@
 #![allow(clippy::result_large_err, clippy::type_complexity, clippy::too_many_arguments)]
 //! Client library: PD client, routing cache with leader discovery and retries,
 //! raw client with exactly-once sessions, and the Percolator transaction client.
+pub mod lease;
 pub mod pd;
 pub mod raw;
 pub mod router;
 pub mod txn_client;
 
+pub use lease::{Lease, LeaseClient};
 pub use pd::PdClient;
 pub use raw::RawClient;
 pub use router::{ClientError, Router};
-pub use txn_client::{IsolationLevel, Txn, TxnClient};
+pub use txn_client::{IsolationLevel, TsSource, Txn, TxnClient};
 
 use rkv_proto::Error;
 

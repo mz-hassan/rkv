@@ -13,17 +13,77 @@ pub struct Mut {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
-    RawPut { key: Vec<u8>, value: Vec<u8>, expire_ms: u64, client: u64, seq: u64 },
-    RawDelete { key: Vec<u8>, client: u64, seq: u64 },
-    RawCas { key: Vec<u8>, expect: Option<Vec<u8>>, new: Vec<u8>, client: u64, seq: u64 },
-    Prewrite { muts: Vec<Mut>, primary: Vec<u8>, start_ts: u64, ttl_ms: u64, read_keys: Vec<Vec<u8>> },
-    Commit { keys: Vec<Vec<u8>>, start_ts: u64, commit_ts: u64 },
-    Rollback { keys: Vec<Vec<u8>>, start_ts: u64 },
-    CheckTxnStatus { primary: Vec<u8>, start_ts: u64, now_ms: u64, rollback_if_not_exist: bool },
-    ResolveLock { keys: Vec<Vec<u8>>, start_ts: u64, commit_ts: u64 },
-    Split { split_key: Vec<u8>, new_range_id: u64 },
-    SweepExpired { now_ms: u64, limit: u32 },
-    Gc { safe_point: u64, limit: u32 },
+    RawPut {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        expire_ms: u64,
+        client: u64,
+        seq: u64,
+    },
+    RawDelete {
+        key: Vec<u8>,
+        client: u64,
+        seq: u64,
+    },
+    /// `expire_ms` = absolute expiry of the NEW value (0 = never); `now_ms` (supplied by the proposer, so replicas agree) lets an
+    /// expired existing value count as absent - this is what the lease/lock service builds on.
+    RawCas {
+        key: Vec<u8>,
+        expect: Option<Vec<u8>>,
+        new: Vec<u8>,
+        client: u64,
+        seq: u64,
+        expire_ms: u64,
+        now_ms: u64,
+    },
+    Prewrite {
+        muts: Vec<Mut>,
+        primary: Vec<u8>,
+        start_ts: u64,
+        ttl_ms: u64,
+        read_keys: Vec<Vec<u8>>,
+    },
+    Commit {
+        keys: Vec<Vec<u8>>,
+        start_ts: u64,
+        commit_ts: u64,
+    },
+    Rollback {
+        keys: Vec<Vec<u8>>,
+        start_ts: u64,
+    },
+    CheckTxnStatus {
+        primary: Vec<u8>,
+        start_ts: u64,
+        now_ms: u64,
+        rollback_if_not_exist: bool,
+    },
+    ResolveLock {
+        keys: Vec<Vec<u8>>,
+        start_ts: u64,
+        commit_ts: u64,
+    },
+    Split {
+        split_key: Vec<u8>,
+        new_range_id: u64,
+    },
+    SweepExpired {
+        now_ms: u64,
+        limit: u32,
+    },
+    Gc {
+        safe_point: u64,
+        limit: u32,
+    },
+    /// freeze this (right) range for a merge; the reply carries the final applied index
+    PrepareMerge,
+    /// extend this (left) range over `right_id` once the local right replica has applied `final_index`
+    CommitMerge {
+        right_id: u64,
+        right_end: Vec<u8>,
+        final_index: u64,
+    },
+    AbortMerge,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +99,12 @@ pub enum Resp {
     /// key not (or no longer) in this range: the client must refresh its route
     RangeMoved,
     Failed(String),
+    /// range is frozen for a merge: retry shortly
+    Busy,
+    MergeReady {
+        final_index: u64,
+        end: Vec<u8>,
+    },
 }
 
 fn put_keys(w: &mut W, ks: &[Vec<u8>]) {
@@ -77,7 +143,7 @@ impl Cmd {
                 w.u64(*client);
                 w.u64(*seq);
             }
-            Cmd::RawCas { key, expect, new, client, seq } => {
+            Cmd::RawCas { key, expect, new, client, seq, expire_ms, now_ms } => {
                 w.u8(3);
                 w.bytes(key);
                 w.bool(expect.is_some());
@@ -85,6 +151,8 @@ impl Cmd {
                 w.bytes(new);
                 w.u64(*client);
                 w.u64(*seq);
+                w.u64(*expire_ms);
+                w.u64(*now_ms);
             }
             Cmd::Prewrite { muts, primary, start_ts, ttl_ms, read_keys } => {
                 w.u8(4);
@@ -138,6 +206,14 @@ impl Cmd {
                 w.u64(*safe_point);
                 w.u64(*limit as u64);
             }
+            Cmd::PrepareMerge => w.u8(12),
+            Cmd::CommitMerge { right_id, right_end, final_index } => {
+                w.u8(13);
+                w.u64(*right_id);
+                w.bytes(right_end);
+                w.u64(*final_index);
+            }
+            Cmd::AbortMerge => w.u8(14),
         }
         w.0
     }
@@ -151,7 +227,15 @@ impl Cmd {
                 let key = r.bytes()?;
                 let has = r.bool()?;
                 let e = r.bytes()?;
-                Cmd::RawCas { key, expect: if has { Some(e) } else { None }, new: r.bytes()?, client: r.u64()?, seq: r.u64()? }
+                Cmd::RawCas {
+                    key,
+                    expect: if has { Some(e) } else { None },
+                    new: r.bytes()?,
+                    client: r.u64()?,
+                    seq: r.u64()?,
+                    expire_ms: r.u64()?,
+                    now_ms: r.u64()?,
+                }
             }
             4 => {
                 let n = r.u64()? as usize;
@@ -177,6 +261,9 @@ impl Cmd {
             9 => Cmd::Split { split_key: r.bytes()?, new_range_id: r.u64()? },
             10 => Cmd::SweepExpired { now_ms: r.u64()?, limit: r.u64()? as u32 },
             11 => Cmd::Gc { safe_point: r.u64()?, limit: r.u64()? as u32 },
+            12 => Cmd::PrepareMerge,
+            13 => Cmd::CommitMerge { right_id: r.u64()?, right_end: r.bytes()?, final_index: r.u64()? },
+            14 => Cmd::AbortMerge,
             _ => return None,
         })
     }
@@ -253,6 +340,12 @@ impl Resp {
                 w.u8(5);
                 w.bytes(s.as_bytes())
             }
+            Resp::Busy => w.u8(6),
+            Resp::MergeReady { final_index, end } => {
+                w.u8(7);
+                w.u64(*final_index);
+                w.bytes(end);
+            }
         }
         w.0
     }
@@ -272,6 +365,8 @@ impl Resp {
             3 => Resp::TxnStatus { action: r.u64()? as u32, commit_ts: r.u64()?, ttl_ms: r.u64()? },
             4 => Resp::RangeMoved,
             5 => Resp::Failed(String::from_utf8_lossy(&r.bytes()?).into_owned()),
+            6 => Resp::Busy,
+            7 => Resp::MergeReady { final_index: r.u64()?, end: r.bytes()? },
             _ => return None,
         })
     }
@@ -284,7 +379,7 @@ mod tests {
     fn cmd_roundtrip() {
         let cmds = vec![
             Cmd::RawPut { key: b"k".to_vec(), value: b"v".to_vec(), expire_ms: 5, client: 1, seq: 2 },
-            Cmd::RawCas { key: b"k".to_vec(), expect: None, new: b"n".to_vec(), client: 1, seq: 3 },
+            Cmd::RawCas { key: b"k".to_vec(), expect: None, new: b"n".to_vec(), client: 1, seq: 3, expire_ms: 9, now_ms: 4 },
             Cmd::Prewrite {
                 muts: vec![Mut { op: MutOp::Put, key: b"a".to_vec(), value: b"1".to_vec() }],
                 primary: b"a".to_vec(),
@@ -295,6 +390,9 @@ mod tests {
             Cmd::Commit { keys: vec![b"a".to_vec(), b"b".to_vec()], start_ts: 9, commit_ts: 10 },
             Cmd::Split { split_key: b"m".to_vec(), new_range_id: 77 },
             Cmd::Gc { safe_point: 5, limit: 100 },
+            Cmd::PrepareMerge,
+            Cmd::CommitMerge { right_id: 7, right_end: b"z".to_vec(), final_index: 99 },
+            Cmd::AbortMerge,
         ];
         for c in cmds {
             assert_eq!(Cmd::decode(&c.encode()).unwrap(), c);

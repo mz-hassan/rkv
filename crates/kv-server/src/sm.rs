@@ -51,6 +51,19 @@ pub struct SplitEvent {
     pub child: RangeDesc,
 }
 
+#[derive(Debug)]
+pub enum RangeEvent {
+    Split(SplitEvent),
+    /// `right_id` was absorbed into `left`
+    Merged {
+        left: RangeDesc,
+        right_id: u64,
+    },
+}
+
+/// Local replicas by range id: a merge needs to look at the (frozen) right neighbour's progress.
+pub type Registry = Arc<parking_lot::RwLock<std::collections::HashMap<u64, Arc<RangeSm>>>>;
+
 /// Engine view with the not-yet-written changes of the current apply batch layered on top.
 pub struct Overlay<'a> {
     db: &'a Db,
@@ -106,7 +119,10 @@ pub struct RangeSm {
     applied: AtomicU64,
     sessions: Mutex<BTreeMap<u64, (u64, Vec<u8>)>>,
     pub events: broadcast::Sender<Arc<Event>>,
-    split_tx: mpsc::UnboundedSender<SplitEvent>,
+    split_tx: mpsc::UnboundedSender<RangeEvent>,
+    registry: Registry,
+    /// 0 = writable; otherwise the applied index at which a merge froze this range
+    frozen_at: AtomicU64,
     pub approx_bytes: AtomicU64,
     pub writes: AtomicU64,
 }
@@ -116,6 +132,9 @@ fn applied_key(id: u64) -> Vec<u8> {
 }
 fn range_key(id: u64) -> Vec<u8> {
     meta_key("range", id)
+}
+fn frozen_key(id: u64) -> Vec<u8> {
+    meta_key("frozen", id)
 }
 fn session_key(id: u64, client: u64) -> Vec<u8> {
     let mut k = meta_key("session", id);
@@ -145,7 +164,7 @@ pub fn persist_range(db: &Db, d: &RangeDesc) -> std::io::Result<()> {
 }
 
 impl RangeSm {
-    pub fn new(db: Arc<Db>, desc: RangeDesc, split_tx: mpsc::UnboundedSender<SplitEvent>) -> Arc<RangeSm> {
+    pub fn new(db: Arc<Db>, desc: RangeDesc, split_tx: mpsc::UnboundedSender<RangeEvent>, registry: Registry) -> Arc<RangeSm> {
         let id = desc.id;
         let applied = db.get(&applied_key(id)).ok().flatten().map(|v| u64::from_le_bytes(v[..8].try_into().unwrap())).unwrap_or(0);
         // the persisted descriptor wins over what the caller thinks (a split may have shrunk us)
@@ -162,6 +181,7 @@ impl RangeSm {
             }
         }
         let (events, _) = broadcast::channel(8192);
+        let frozen = db.get(&frozen_key(id)).ok().flatten().map(|v| u64::from_le_bytes(v[..8].try_into().unwrap())).unwrap_or(0);
         let sm = Arc::new(RangeSm {
             db,
             id,
@@ -170,11 +190,17 @@ impl RangeSm {
             sessions: Mutex::new(sessions),
             events,
             split_tx,
+            registry,
+            frozen_at: AtomicU64::new(frozen),
             approx_bytes: AtomicU64::new(0),
             writes: AtomicU64::new(0),
         });
         sm.recompute_size();
         sm
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        self.frozen_at.load(Ordering::SeqCst) != 0
     }
 
     pub fn desc(&self) -> RangeDesc {
@@ -295,12 +321,16 @@ impl RangeSm {
         cmd: Cmd,
         ov: &mut Overlay,
         events: &mut Vec<Event>,
-        splits: &mut Vec<SplitEvent>,
+        splits: &mut Vec<RangeEvent>,
         sessions: &mut BTreeMap<u64, (u64, Vec<u8>)>,
     ) -> Resp {
         let d = self.desc();
         if cmd.keys().iter().any(|k| !d.contains(k)) {
             return Resp::RangeMoved;
+        }
+        // a range frozen for a merge accepts no writes (reads still work); clients retry until the merge completes or aborts
+        if self.is_frozen() && !matches!(cmd, Cmd::PrepareMerge | Cmd::AbortMerge | Cmd::Gc { .. } | Cmd::SweepExpired { .. }) {
+            return Resp::Busy;
         }
         let dedup = |client: u64, seq: u64, sessions: &BTreeMap<u64, (u64, Vec<u8>)>| -> Option<Resp> {
             if client == 0 {
@@ -342,14 +372,15 @@ impl RangeSm {
                 record(client, seq, &r, sessions, ov, self.id);
                 r
             }
-            Cmd::RawCas { key, expect, new, client, seq } => {
+            Cmd::RawCas { key, expect, new, client, seq, expire_ms, now_ms } => {
                 if let Some(r) = dedup(client, seq, sessions) {
                     return r;
                 }
-                let cur = ov.get(&raw_key(&key)).and_then(|v| parse_raw_value(&v).map(|(_, x)| x.to_vec()));
+                // an expired value counts as absent (lease semantics); `now_ms` comes from the proposer so all replicas agree
+                let cur = ov.get(&raw_key(&key)).and_then(|v| parse_raw_value(&v).filter(|(exp, _)| *exp == 0 || *exp > now_ms).map(|(_, x)| x.to_vec()));
                 let ok = cur == expect;
                 if ok {
-                    ov.put(raw_key(&key), raw_value(0, &new));
+                    ov.put(raw_key(&key), raw_value(expire_ms, &new));
                     events.push(Event { index, key, value: new, deleted: false });
                 }
                 let r = Resp::Cas(ok);
@@ -461,7 +492,54 @@ impl RangeSm {
                 ov.put(range_key(left.id), left.encode());
                 ov.put(range_key(right.id), right.encode());
                 *self.desc.write() = left.clone();
-                splits.push(SplitEvent { parent: left, child: right });
+                splits.push(RangeEvent::Split(SplitEvent { parent: left, child: right }));
+                Resp::Ok
+            }
+            Cmd::PrepareMerge => {
+                let at = match self.frozen_at.load(Ordering::SeqCst) {
+                    0 => {
+                        self.frozen_at.store(index, Ordering::SeqCst);
+                        ov.put(frozen_key(self.id), index.to_le_bytes().to_vec());
+                        index
+                    }
+                    already => already, // idempotent
+                };
+                Resp::MergeReady { final_index: at, end: d.end.clone() }
+            }
+            Cmd::AbortMerge => {
+                self.frozen_at.store(0, Ordering::SeqCst);
+                ov.del(frozen_key(self.id));
+                Resp::Ok
+            }
+            Cmd::CommitMerge { right_id, right_end, final_index } => {
+                if d.end.is_empty() {
+                    return Resp::Failed("range has no right neighbour".into());
+                }
+                // Every replica must hold ALL of the right range's data before the right group disappears.
+                // The right group applies on its own task; wait (bounded) for it to reach the freeze point.
+                let started = std::time::Instant::now();
+                let right = loop {
+                    let r = self.registry.read().get(&right_id).cloned();
+                    if let Some(r) = r {
+                        if r.applied.load(Ordering::SeqCst) >= final_index {
+                            break r;
+                        }
+                    }
+                    if started.elapsed() > std::time::Duration::from_secs(60) {
+                        panic!("range {}: merge with {right_id} cannot proceed: local replica of the right range is missing or behind {final_index}", self.id);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                };
+                let rd = right.desc();
+                if rd.start != d.end || rd.end != right_end || !right.is_frozen() {
+                    return Resp::Failed("merge preconditions no longer hold".into());
+                }
+                let left = RangeDesc { id: d.id, start: d.start.clone(), end: right_end, version: d.version.max(rd.version) + 1 };
+                ov.put(range_key(left.id), left.encode());
+                ov.del(range_key(right_id));
+                ov.del(frozen_key(right_id));
+                *self.desc.write() = left.clone();
+                splits.push(RangeEvent::Merged { left, right_id });
                 Resp::Ok
             }
             Cmd::SweepExpired { now_ms, limit } => {
@@ -570,12 +648,13 @@ impl StateMachine for RangeSm {
             w.bytes(&k);
             w.bytes(&v);
         }
+        w.u64(self.frozen_at.load(Ordering::SeqCst));
         w.0
     }
 
     fn restore(&self, index: u64, data: &[u8]) {
         let mut r = R(data);
-        let parsed = (|| -> Option<(RangeDesc, BTreeMap<u64, (u64, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>)> {
+        let parsed = (|| -> Option<(RangeDesc, BTreeMap<u64, (u64, Vec<u8>)>, Vec<(Vec<u8>, Vec<u8>)>, u64)> {
             let d = RangeDesc::decode(&r.bytes()?)?;
             let mut sessions = BTreeMap::new();
             for _ in 0..r.u64()? {
@@ -585,9 +664,10 @@ impl StateMachine for RangeSm {
             for _ in 0..r.u64()? {
                 items.push((r.bytes()?, r.bytes()?));
             }
-            Some((d, sessions, items))
+            let frozen = r.u64().unwrap_or(0);
+            Some((d, sessions, items, frozen))
         })();
-        let Some((d, sessions, items)) = parsed else { panic!("range {}: corrupt snapshot", self.id) };
+        let Some((d, sessions, items, frozen)) = parsed else { panic!("range {}: corrupt snapshot", self.id) };
         let old = self.desc();
         let mut wb = WriteBatch::new();
         // clear the union of the old and the snapshot's key ranges
@@ -604,6 +684,12 @@ impl StateMachine for RangeSm {
         }
         wb.put(&range_key(d.id), &d.encode());
         wb.put(&applied_key(self.id), &index.to_le_bytes());
+        if frozen != 0 {
+            wb.put(&frozen_key(self.id), &frozen.to_le_bytes());
+        } else {
+            wb.delete(&frozen_key(self.id));
+        }
+        self.frozen_at.store(frozen, Ordering::SeqCst);
         for (c, (s, rr)) in &sessions {
             let mut v = s.to_le_bytes().to_vec();
             v.extend_from_slice(rr);
@@ -623,11 +709,11 @@ mod tests {
     use kv_engine::{MemFs, Options};
     use txn::percolator::MutOp;
 
-    fn mk(id: u64, start: &[u8], end: &[u8]) -> (Arc<RangeSm>, mpsc::UnboundedReceiver<SplitEvent>) {
+    fn mk(id: u64, start: &[u8], end: &[u8]) -> (Arc<RangeSm>, mpsc::UnboundedReceiver<RangeEvent>) {
         let fs = MemFs::new();
         let db = Arc::new(Db::open(Options { background: false, ..Options::default() }, fs.as_vfs(), "/db").unwrap());
         let (tx, rx) = mpsc::unbounded_channel();
-        (RangeSm::new(db, RangeDesc { id, start: start.to_vec(), end: end.to_vec(), version: 1 }, tx), rx)
+        (RangeSm::new(db, RangeDesc { id, start: start.to_vec(), end: end.to_vec(), version: 1 }, tx, Registry::default()), rx)
     }
     fn ap(sm: &RangeSm, idx: u64, c: Cmd) -> Resp {
         Resp::decode(&sm.apply_batch(&[(idx, 1, Some(c.encode()))])[0]).unwrap()
@@ -644,8 +730,14 @@ mod tests {
         assert_eq!(sm.read_raw(b"b", 0).unwrap(), b"2");
         // outside the range
         assert_eq!(ap(&sm, 4, Cmd::RawPut { key: b"z".to_vec(), value: b"x".to_vec(), expire_ms: 0, client: 0, seq: 0 }), Resp::RangeMoved);
-        assert_eq!(ap(&sm, 5, Cmd::RawCas { key: b"b".to_vec(), expect: Some(b"2".to_vec()), new: b"3".to_vec(), client: 7, seq: 3 }), Resp::Cas(true));
-        assert_eq!(ap(&sm, 6, Cmd::RawCas { key: b"b".to_vec(), expect: Some(b"2".to_vec()), new: b"4".to_vec(), client: 7, seq: 4 }), Resp::Cas(false));
+        assert_eq!(
+            ap(&sm, 5, Cmd::RawCas { key: b"b".to_vec(), expect: Some(b"2".to_vec()), new: b"3".to_vec(), client: 7, seq: 3, expire_ms: 0, now_ms: 0 }),
+            Resp::Cas(true)
+        );
+        assert_eq!(
+            ap(&sm, 6, Cmd::RawCas { key: b"b".to_vec(), expect: Some(b"2".to_vec()), new: b"4".to_vec(), client: 7, seq: 4, expire_ms: 0, now_ms: 0 }),
+            Resp::Cas(false)
+        );
         assert_eq!(sm.applied_index(), 6);
     }
 
@@ -670,7 +762,7 @@ mod tests {
             ap(&sm, i as u64 + 1, Cmd::RawPut { key: k.to_vec(), value: b"v".to_vec(), expire_ms: 0, client: 1, seq: i as u64 + 1 });
         }
         assert_eq!(ap(&sm, 10, Cmd::Split { split_key: b"m".to_vec(), new_range_id: 2 }), Resp::Ok);
-        let ev = rx.try_recv().unwrap();
+        let RangeEvent::Split(ev) = rx.try_recv().unwrap() else { panic!("expected a split event") };
         assert_eq!((ev.parent.end.clone(), ev.child.start.clone(), ev.child.id), (b"m".to_vec(), b"m".to_vec(), 2));
         assert_eq!(ap(&sm, 11, Cmd::RawPut { key: b"t".to_vec(), value: b"x".to_vec(), expire_ms: 0, client: 0, seq: 0 }), Resp::RangeMoved);
         // snapshot contains only the left range's data
@@ -691,5 +783,40 @@ mod tests {
         assert!(sm.read_raw(b"t", 150).is_none());
         ap(&sm, 2, Cmd::SweepExpired { now_ms: 150, limit: 100 });
         assert!(sm.db.get(&raw_key(b"t")).unwrap().is_none());
+    }
+
+    #[test]
+    fn cas_treats_expired_values_as_absent_and_sets_expiry() {
+        let (sm, _rx) = mk(1, b"", b"");
+        let cas = |exp: Option<&[u8]>, new: &[u8], expire_ms, now_ms| Cmd::RawCas {
+            key: b"lock".to_vec(),
+            expect: exp.map(|e| e.to_vec()),
+            new: new.to_vec(),
+            client: 0,
+            seq: 0,
+            expire_ms,
+            now_ms,
+        };
+        assert_eq!(ap(&sm, 1, cas(None, b"A", 1000, 10)), Resp::Cas(true));
+        assert_eq!(ap(&sm, 2, cas(None, b"B", 2000, 500)), Resp::Cas(false)); // A still holds the lease
+        assert_eq!(ap(&sm, 3, cas(None, b"B", 3000, 1001)), Resp::Cas(true)); // A expired
+        assert_eq!(sm.read_raw(b"lock", 1500).unwrap(), b"B");
+    }
+
+    #[test]
+    fn frozen_range_rejects_writes_until_aborted() {
+        let (sm, _rx) = mk(1, b"", b"");
+        ap(&sm, 1, Cmd::RawPut { key: b"a".to_vec(), value: b"1".to_vec(), expire_ms: 0, client: 0, seq: 0 });
+        assert_eq!(ap(&sm, 2, Cmd::PrepareMerge), Resp::MergeReady { final_index: 2, end: vec![] });
+        assert_eq!(ap(&sm, 3, Cmd::PrepareMerge), Resp::MergeReady { final_index: 2, end: vec![] }); // idempotent
+        assert_eq!(ap(&sm, 4, Cmd::RawPut { key: b"a".to_vec(), value: b"2".to_vec(), expire_ms: 0, client: 0, seq: 0 }), Resp::Busy);
+        assert_eq!(sm.read_raw(b"a", 0).unwrap(), b"1");
+        // the frozen state survives snapshot/restore
+        let snap = sm.snapshot();
+        let (sm2, _r2) = mk(1, b"", b"");
+        sm2.restore(4, &snap);
+        assert!(sm2.is_frozen());
+        assert_eq!(ap(&sm, 5, Cmd::AbortMerge), Resp::Ok);
+        assert_eq!(ap(&sm, 6, Cmd::RawPut { key: b"a".to_vec(), value: b"3".to_vec(), expire_ms: 0, client: 0, seq: 0 }), Resp::Ok);
     }
 }

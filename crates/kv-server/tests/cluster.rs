@@ -189,3 +189,116 @@ async fn exactly_once_writes_across_retries() {
     }
     assert_eq!(c.get(b"ctr").await.unwrap().unwrap(), b"80");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn ranges_merge_back_without_losing_data() {
+    use rkv_proto::MergeReq;
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let addrs = addr_map();
+    let nodes = start_cluster(&dirs, &addrs).await;
+    let c = RawClient::new(None, addrs.values().cloned().collect());
+    for i in 0..200u32 {
+        c.put(format!("key{i:04}").as_bytes(), format!("v{i}").as_bytes()).await.unwrap();
+    }
+    // split at key0100 (try every store until the leader accepts)
+    let mut split_ok = false;
+    for _ in 0..20 {
+        for a in addrs.values() {
+            let r = AdminClient::new(::kv_client::pd::channel(a).unwrap())
+                .split_range(SplitReq { range_id: 1, split_key: b"key0100".to_vec() })
+                .await
+                .unwrap()
+                .into_inner();
+            if r.error.is_none() {
+                split_ok = true;
+                break;
+            }
+        }
+        if split_ok {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert!(split_ok);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for n in &nodes {
+        assert_eq!(n.store.all_replicas().len(), 2);
+    }
+    // find the child range id
+    let st = AdminClient::new(::kv_client::pd::channel(&addrs[&1]).unwrap()).status(Empty {}).await.unwrap().into_inner();
+    let right_id = st.ranges.iter().filter_map(|r| r.info.as_ref()).find(|i| i.id != 1).unwrap().id;
+    c.router.refresh_all().await.unwrap();
+    c.put(b"key0001", b"left-before").await.unwrap();
+    c.put(b"key0199", b"right-before").await.unwrap();
+
+    // phase 1 (freeze right), phase 2 (extend left): try each store until the respective leader accepts
+    let call = |phase: u32, fi: u64, re: Vec<u8>| {
+        let addrs: Vec<String> = addrs.values().cloned().collect();
+        async move {
+            for _ in 0..30 {
+                for a in &addrs {
+                    let r = AdminClient::new(::kv_client::pd::channel(a).unwrap())
+                        .merge_range(MergeReq { left_id: 1, right_id, phase, final_index: fi, right_end: re.clone() })
+                        .await
+                        .unwrap()
+                        .into_inner();
+                    if r.error.is_none() {
+                        return r;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            panic!("merge phase {phase} never succeeded");
+        }
+    };
+    let p1 = call(1, 0, vec![]).await;
+    // while frozen, writes to the right range are refused/retried, reads still work
+    let during = tokio::time::timeout(Duration::from_millis(800), c.put(b"key0150", b"while-frozen")).await;
+    assert!(during.is_err() || during.unwrap().is_err(), "a frozen range must not accept writes");
+    assert_eq!(c.get(b"key0199").await.unwrap().unwrap(), b"right-before");
+    let _p2 = call(2, p1.final_index, p1.right_end.clone()).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    for n in &nodes {
+        assert_eq!(n.store.all_replicas().len(), 1, "the right replica must be gone on every store");
+    }
+    c.router.refresh_all().await.unwrap();
+    assert_eq!(c.scan(b"key", b"kez", 0).await.unwrap().len(), 200, "no key may be lost by the merge");
+    assert_eq!(c.get(b"key0199").await.unwrap().unwrap(), b"right-before");
+    c.put(b"key0150", b"after-merge").await.unwrap();
+    assert_eq!(c.get(b"key0150").await.unwrap().unwrap(), b"after-merge");
+    drop(nodes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn lease_service_mutual_exclusion_expiry_and_fencing() {
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let addrs = addr_map();
+    let _nodes = start_cluster(&dirs, &addrs).await;
+    let seeds: Vec<String> = addrs.values().cloned().collect();
+    let a = ::kv_client::LeaseClient::new(std::sync::Arc::new(RawClient::new(None, seeds.clone())));
+    let b = ::kv_client::LeaseClient::new(std::sync::Arc::new(RawClient::new(None, seeds.clone())));
+    let la = a.acquire("db-primary", "alice", 700).await.unwrap().expect("first acquire wins");
+    assert!(b.acquire("db-primary", "bob", 700).await.unwrap().is_none(), "mutual exclusion while the lease is live");
+    assert_eq!(b.holder("db-primary").await.unwrap().unwrap().0, "alice");
+    assert!(a.renew(&la).await.unwrap(), "holder can renew");
+    // let it expire: the replicated state machine, not the clients, decides
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!a.renew(&la).await.unwrap(), "an expired lease cannot be renewed");
+    let lb = b.acquire("db-primary", "bob", 5000).await.unwrap().expect("expired lease can be taken");
+    assert!(lb.token > la.token, "fencing tokens increase: {} vs {}", lb.token, la.token);
+    assert!(!a.release(&la).await.unwrap(), "a stale holder cannot release someone else's lease");
+    assert!(b.release(&lb).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(a.acquire("db-primary", "alice", 1000).await.unwrap().is_some(), "free after release");
+    // many contenders: exactly one winner
+    let mut hs = vec![];
+    for i in 0..8 {
+        let c = ::kv_client::LeaseClient::new(std::sync::Arc::new(RawClient::new(None, seeds.clone())));
+        hs.push(tokio::spawn(async move { c.acquire("race", &format!("c{i}"), 10_000).await.unwrap().is_some() }));
+    }
+    let mut winners = 0;
+    for h in hs {
+        winners += h.await.unwrap() as u32;
+    }
+    assert_eq!(winners, 1, "exactly one of the contenders may win the lock");
+}

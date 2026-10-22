@@ -95,6 +95,11 @@ impl RawClient {
 
     /// Compare-and-swap; returns whether the swap happened.
     pub async fn cas(&self, key: &[u8], expect: Option<&[u8]>, new: &[u8]) -> Result<bool, ClientError> {
+        self.cas_ttl(key, expect, new, 0).await
+    }
+
+    /// CAS whose new value expires after `ttl_ms` (0 = never). An expired value counts as absent for later CAS calls.
+    pub async fn cas_ttl(&self, key: &[u8], expect: Option<&[u8]>, new: &[u8], ttl_ms: u64) -> Result<bool, ClientError> {
         let (cid, seq) = (self.client_id, self.next_seq());
         let (k, n, e) = (key.to_vec(), new.to_vec(), expect.map(|e| e.to_vec()));
         let r = self
@@ -108,6 +113,7 @@ impl RawClient {
                     new_value: n.clone(),
                     client_id: cid,
                     seq,
+                    ttl_ms,
                 };
                 async move { c.cas(req).await }
             })

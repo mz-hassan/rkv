@@ -1,6 +1,6 @@
 //! A Store is one node: a shared storage engine hosting many Raft groups (ranges).
 use crate::cmd::Cmd;
-use crate::sm::{load_ranges, persist_range, RangeDesc, RangeSm, SplitEvent};
+use crate::sm::{load_ranges, persist_range, RangeDesc, RangeEvent, RangeSm, Registry};
 use crate::transport::{AddrBook, GrpcTransport};
 use ::kv_client::PdClient;
 use kv_engine::{Db, Options, OsFs, Vfs, WriteBatch};
@@ -75,7 +75,8 @@ pub struct Store {
     index: RwLock<BTreeMap<Vec<u8>, u64>>, // range start -> range id
     pub addrs: AddrBook,
     pub transport: Arc<GrpcTransport>,
-    split_tx: mpsc::UnboundedSender<SplitEvent>,
+    split_tx: mpsc::UnboundedSender<RangeEvent>,
+    registry: Registry,
     pub pd: Option<Arc<PdClient>>,
     pub metrics: Metrics,
     creating: Mutex<HashSet<u64>>,
@@ -142,6 +143,7 @@ impl Store {
             addrs,
             transport,
             split_tx,
+            registry: Registry::default(),
             pd,
             metrics: Metrics::default(),
             creating: Mutex::new(HashSet::new()),
@@ -188,7 +190,8 @@ impl Store {
             self.db.write(wb)?;
         }
         persist_range(&self.db, &desc)?;
-        let sm = RangeSm::new(self.db.clone(), desc, self.split_tx.clone());
+        let sm = RangeSm::new(self.db.clone(), desc, self.split_tx.clone(), self.registry.clone());
+        self.registry.write().insert(id, sm.clone());
         let dir = format!("{}/raft/{}", self.cfg.data_dir, id);
         let handle = spawn_group(
             id,
@@ -359,25 +362,47 @@ impl Store {
 
     // ------------------------------------------------------------ background loops
 
-    async fn split_loop(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<SplitEvent>) {
+    async fn split_loop(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<RangeEvent>) {
         while let Some(ev) = rx.recv().await {
             if self.is_closed() {
                 return;
             }
-            let voters = match self.replica(ev.parent.id) {
-                Some(p) => match p.handle.status().await {
-                    Some(st) => st.membership.all_voters(),
-                    None => continue,
-                },
-                None => continue,
-            };
-            if self.replica(ev.child.id).is_none() {
-                if let Err(e) = self.start_replica(ev.child.clone(), voters) {
-                    tracing::error!("failed to start child range {}: {e}", ev.child.id);
+            match ev {
+                RangeEvent::Split(ev) => {
+                    let voters = match self.replica(ev.parent.id) {
+                        Some(p) => match p.handle.status().await {
+                            Some(st) => st.membership.all_voters(),
+                            None => continue,
+                        },
+                        None => continue,
+                    };
+                    if self.replica(ev.child.id).is_none() {
+                        if let Err(e) = self.start_replica(ev.child.clone(), voters) {
+                            tracing::error!("failed to start child range {}: {e}", ev.child.id);
+                        }
+                    }
+                    self.rebuild_index();
+                    tracing::info!(parent = ev.parent.id, child = ev.child.id, "range split applied");
+                }
+                RangeEvent::Merged { left, right_id } => {
+                    // the left range now owns the right range's keys (the data is already in the shared engine)
+                    if let Some(r) = self.replica(right_id) {
+                        r.handle.stop().await;
+                    }
+                    self.replicas.write().remove(&right_id);
+                    self.registry.write().remove(&right_id);
+                    self.tombstones.lock().insert(right_id);
+                    let mut wb = WriteBatch::new();
+                    wb.put(&tomb_key(right_id), b"1");
+                    let _ = self.db.write(wb);
+                    let _ = std::fs::remove_dir_all(format!("{}/raft/{}", self.cfg.data_dir, right_id));
+                    if let Some(l) = self.replica(left.id) {
+                        l.sm.recompute_size();
+                    }
+                    self.rebuild_index();
+                    tracing::info!(left = left.id, right = right_id, "range merge applied");
                 }
             }
-            self.rebuild_index();
-            tracing::info!(parent = ev.parent.id, child = ev.child.id, "range split applied");
         }
     }
 

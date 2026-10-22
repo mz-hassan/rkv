@@ -104,6 +104,7 @@ impl Store {
         match self.propose(&rep, cmd).await? {
             Resp::RangeMoved => Err(self.range_moved(&rep).await),
             Resp::Failed(m) => Err(e(6, &m)),
+            Resp::Busy => Err(e(3, "range is frozen for a merge; retry")),
             r => Ok(r),
         }
     }
@@ -155,8 +156,16 @@ impl Kv for KvSvc {
 
     async fn cas(&self, req: Request<CasReq>) -> Res<CasResp> {
         let r = req.into_inner();
-        let cmd =
-            Cmd::RawCas { key: r.key.clone(), expect: if r.has_expect { Some(r.expect) } else { None }, new: r.new_value, client: r.client_id, seq: r.seq };
+        let now = now_ms();
+        let cmd = Cmd::RawCas {
+            key: r.key.clone(),
+            expect: if r.has_expect { Some(r.expect) } else { None },
+            new: r.new_value,
+            client: r.client_id,
+            seq: r.seq,
+            expire_ms: if r.ttl_ms > 0 { now + r.ttl_ms } else { 0 },
+            now_ms: now,
+        };
         Ok(Response::new(match self.0.write(&r.ctx, &r.key, cmd).await {
             Ok(Resp::Cas(b)) => CasResp { error: None, success: b },
             Ok(_) => CasResp { error: Some(e(6, "unexpected response")), success: false },
@@ -394,6 +403,51 @@ impl Admin for AdminSvc {
             Ok(()) => aok("split applied"),
             Err(m) => aerr(6, &m),
         }))
+    }
+
+    async fn merge_range(&self, req: Request<MergeReq>) -> Res<MergeResp> {
+        let r = req.into_inner();
+        let s = &self.0;
+        let fail = |er: Error| Ok(Response::new(MergeResp { error: Some(er), msg: String::new(), final_index: 0, right_end: vec![] }));
+        let (Some(left), Some(right)) = (s.replica(r.left_id), s.replica(r.right_id)) else {
+            return fail(e(4, "this store does not host both ranges"));
+        };
+        match r.phase {
+            // phase 1: freeze the right range (must lead it) after checking both groups have identical, stable membership
+            1 => {
+                let (Some(ls), Some(rs)) = (left.handle.status().await, right.handle.status().await) else { return fail(e(6, "range stopped")) };
+                if ls.membership.is_joint()
+                    || rs.membership.is_joint()
+                    || ls.membership.voters != rs.membership.voters
+                    || !ls.membership.learners.is_empty()
+                    || !rs.membership.learners.is_empty()
+                {
+                    return fail(e(6, "ranges must have identical, stable voter sets to merge (move replicas first)"));
+                }
+                if left.sm.desc().end != right.sm.desc().start {
+                    return fail(e(6, "ranges are not adjacent"));
+                }
+                match s.propose(&right, Cmd::PrepareMerge).await {
+                    Ok(Resp::MergeReady { final_index, end }) => {
+                        Ok(Response::new(MergeResp { error: None, msg: "right range frozen".into(), final_index, right_end: end }))
+                    }
+                    Ok(other) => fail(e(6, &format!("unexpected response {other:?}"))),
+                    Err(er) => fail(er),
+                }
+            }
+            // phase 2: extend the left range (must lead it)
+            2 => match s.propose(&left, Cmd::CommitMerge { right_id: r.right_id, right_end: r.right_end.clone(), final_index: r.final_index }).await {
+                Ok(Resp::Ok) => Ok(Response::new(MergeResp { error: None, msg: "merged".into(), final_index: r.final_index, right_end: r.right_end })),
+                Ok(Resp::Failed(m)) => fail(e(6, &m)),
+                Ok(other) => fail(e(6, &format!("unexpected response {other:?}"))),
+                Err(er) => fail(er),
+            },
+            // phase 3: abort, unfreeze the right range
+            _ => match s.propose(&right, Cmd::AbortMerge).await {
+                Ok(_) => Ok(Response::new(MergeResp { error: None, msg: "merge aborted".into(), final_index: 0, right_end: vec![] })),
+                Err(er) => fail(er),
+            },
+        }
     }
 
     async fn set_faults(&self, req: Request<FaultsReq>) -> Res<AdminResp> {
