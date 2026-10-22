@@ -127,7 +127,7 @@ Every row is a script that supports `DRY_RUN=1` (print commands) and `SCALE=smok
 
 | ID | Question | Command | ~Time | Hypothesis (unverified) |
 |---|---|---|---|---|
-| S1 | Single-node engine vs RocksDB: YCSB A–F, p50/p99/p99.9, write/read/space amplification, Bloom FPR vs theory, cache hit ratio vs size, fsync-policy trade-off, leveled vs tiered, recovery time vs WAL size | `make bench-s1` (+ `make build-baselines`, `RKV_ROCKS=1`) | 2 h | within 0.3×–1.5× of RocksDB |
+| S1 | Single-node engine vs RocksDB (fsync **off** on both sides for the headline; fsync modes compared separately and labelled): YCSB A–F, p50/p99/p99.9, write/read/space amplification, Bloom FPR vs theory, cache hit ratio vs size, fsync-policy trade-off, leveled vs tiered, recovery time vs WAL size | `make bench-s1` (+ `make build-baselines`, `RKV_ROCKS=1`) | 2 h | within 0.3×–1.5× of RocksDB |
 | S2 | Do acknowledged writes survive crashes? simulated power loss ×5000, SIGKILL ×500, whole-cluster kill -9 | `make bench-s2` | 30 min | zero lost |
 | S3 | Memory under sustained load (soak) | `make bench-soak` | 30 min | RSS flat after warm-up |
 | R1 | Replicated throughput/latency: 1/3/5 nodes × mixes × value sizes, batching/pipelining on/off, ReadIndex vs lease vs follower reads, **vs etcd** | `make bench-r1 bench-etcd` | 3 h | 0.5×–1.5× of etcd (localhost, caveats) |

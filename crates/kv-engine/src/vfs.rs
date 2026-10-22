@@ -58,17 +58,30 @@ impl VFile for OsFile {
         Ok(())
     }
     fn sync(&self) -> io::Result<()> {
+        // NOTE: Rust's File::sync_data/sync_all use fcntl(F_FULLFSYNC) on Apple platforms, which flushes the drive cache and is
+        // ~10-100x slower than fsync(2). Call the two explicitly so "strict" vs "plain" mean what the benchmarks label them.
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::io::AsRawFd;
-            if self.strict {
-                // fsync on macOS does not flush the drive cache; F_FULLFSYNC does.
-                let r = unsafe { libc_fullfsync(self.f.as_raw_fd()) };
-                return if r == -1 { Err(io::Error::last_os_error()) } else { Ok(()) };
+            let fd = self.f.as_raw_fd();
+            let r = unsafe {
+                if self.strict {
+                    libc_fullfsync(fd)
+                } else {
+                    fsync(fd)
+                }
+            };
+            if r == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
             }
         }
-        let _ = self.strict;
-        self.f.sync_data()
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self.strict;
+            self.f.sync_data()
+        }
     }
     fn read_at(&self, off: u64, len: usize) -> io::Result<Vec<u8>> {
         let mut buf = vec![0u8; len];
@@ -91,6 +104,7 @@ impl VFile for OsFile {
 #[cfg(target_os = "macos")]
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn fsync(fd: i32) -> i32;
 }
 #[cfg(target_os = "macos")]
 unsafe fn libc_fullfsync(fd: i32) -> i32 {

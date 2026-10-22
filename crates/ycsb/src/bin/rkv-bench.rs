@@ -121,6 +121,8 @@ impl SyncKv for RkvKv {
 #[cfg(feature = "rocksdb-baseline")]
 struct RocksKv {
     db: rocksdb::DB,
+    /// durable acknowledgement (fsync) per write, matching rkv's Always/Group policies; RocksDB groups concurrent synced writes itself
+    sync: bool,
 }
 #[cfg(feature = "rocksdb-baseline")]
 impl SyncKv for RocksKv {
@@ -128,7 +130,18 @@ impl SyncKv for RocksKv {
         self.db.get(k).unwrap().is_some()
     }
     fn put(&self, k: &[u8], v: &[u8]) {
-        self.db.put(k, v).unwrap()
+        let mut wo = rocksdb::WriteOptions::default();
+        wo.set_sync(self.sync);
+        self.db.put_opt(k, v, &wo).unwrap()
+    }
+    fn put_batch(&self, kvs: &[(Vec<u8>, Vec<u8>)]) {
+        let mut b = rocksdb::WriteBatch::default();
+        for (k, v) in kvs {
+            b.put(k, v);
+        }
+        let mut wo = rocksdb::WriteOptions::default();
+        wo.set_sync(self.sync);
+        self.db.write_opt(b, &wo).unwrap();
     }
     fn scan(&self, k: &[u8], n: usize) -> usize {
         self.db.iterator(rocksdb::IteratorMode::From(k, rocksdb::Direction::Forward)).take(n).count()
@@ -160,13 +173,12 @@ fn open_backend(a: &Args, dir: &str, sync: SyncPolicy) -> (Arc<dyn SyncKv>, Valu
             bo.set_block_size(4096);
             o.set_block_based_table_factory(&bo);
             o.set_compression_type(rocksdb::DBCompressionType::None); // same as rkv: no compression
-            let mut wo = rocksdb::WriteOptions::default();
-            wo.set_sync(matches!(sync, SyncPolicy::Always));
-            let _ = wo;
+            let durable = matches!(sync, SyncPolicy::Always | SyncPolicy::Group);
             let db = rocksdb::DB::open(&o, dir).unwrap();
             (
-                Arc::new(RocksKv { db }),
-                json!({"backend": "rocksdb", "crate": "rocksdb 0.22", "note": "sync policy approximated: group commit not separately configurable"}),
+                Arc::new(RocksKv { db, sync: durable }),
+                json!({"backend": "rocksdb", "crate": "rocksdb 0.22", "wal_sync_per_write": durable,
+                       "note": "Always/Group map to WriteOptions.sync=true (RocksDB groups concurrent synced writes itself); Interval/Never map to sync=false; compression off, 4 KiB blocks, 10-bit Bloom"}),
             )
         }
         _ => {
@@ -509,6 +521,7 @@ fn read_consistency(s: &str) -> kv_client::raw::ReadConsistency {
 }
 
 /// Client abstraction so the same workload can target rkv or an etcd baseline.
+#[allow(clippy::large_enum_variant)]
 enum Be {
     Rkv(kv_client::RawClient),
     #[cfg(feature = "etcd-baseline")]

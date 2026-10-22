@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# S1: single-node engine. HEADLINE YCSB RUNS USE --sync never ON BOTH SIDES (compares engine efficiency without mixing in how each
+# system calls fsync; durability modes are compared separately in the S1-fsync-* runs and must be reported with their labels).
 # S1: single-node engine. YCSB A-F, fsync/cache/compaction sweeps, recovery vs WAL size. Add RocksDB baseline with RKV_ROCKS=1 (needs the rocksdb-baseline build).
 source "$(dirname "$0")/lib.sh"; need rkv-bench; banner S1
 R=$(pick 3000 10000000); O=$(pick 3000 5000000); T=$(pick 2 8)
@@ -6,7 +8,7 @@ backends="rkv"; [ "${RKV_ROCKS:-0}" = 1 ] && backends="rkv rocksdb"
 for be in $backends; do
   B=$BIN/rkv-bench; [ "$be" = rocksdb ] && B=$BIN/rkv-bench-rocksdb   # built by `make build-baselines`
   for w in a b c d e f; do
-    run $B engine --backend $be --id S1-ycsb-$w-$be --workload $w --records $R --ops $O --threads $T --sync group --out $OUT
+    run $B engine --backend $be --id S1-ycsb-$w-$be --workload $w --records $R --ops $O --threads $T --sync never --out $OUT
   done
   # fsync policy trade-off (workload A)
   for sync in always group interval=100 never; do

@@ -62,6 +62,16 @@ connections alive; fixed by running each test node on its own runtime and droppi
 - **Found by:** the compiler (`future cannot be sent between threads safely`); it would also have deadlocked on leader redirect.
 - **Fix:** read the address count into a local before the retry loop.
 
+## BUG-009b: "non-strict" fsync on macOS was actually a full drive-cache flush
+- **Found by:** a sanity check of the RocksDB baseline: with `sync=true` it reported ~109k ops/s against ~0.7k for rkv with the same
+  nominal durability. The gap was too big to be an engine difference.
+- **Root cause:** Rust's `File::sync_data/sync_all` call `fcntl(F_FULLFSYNC)` on Apple platforms, so the default mode already paid for
+  the strictest flush, and `--strict-fsync` meant nothing. Any rkv-vs-RocksDB durability comparison would have been unfair to rkv.
+- **Fix:** `OsFile::sync` calls `fsync(2)` (default) or `F_FULLFSYNC` (strict) explicitly; the headline S1 comparison now disables
+  fsync on both sides and the fsync runs are labelled separately. Also fixed: the RocksDB wrapper built its `WriteOptions` but
+  never applied them (it silently ran without fsync).
+- **Why it matters:** a benchmark-integrity bug, the kind that produces an impressive-looking but false resume number.
+
 ## BUG-009: benchmark/tooling scripts
 - `cluster.sh up` exited non-zero in static mode (last command was a failing `[ ] && echo` under `set -e`), silently aborting R1.
 - `kvctl presplit` split a child range before it had elected a leader; now retries.

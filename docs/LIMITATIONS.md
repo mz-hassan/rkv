@@ -8,7 +8,7 @@
   disk in the simulator). Kernel-level `tc netem`, `iptables`, `dm-flakey` and `perf` runs are coded (`deploy/cloud/`) but not executed.
 * `kill -9` tests process crashes only: the OS page cache survives, so they are **not** power-loss tests. The simulated
   power-loss model (unsynced bytes lost, torn tail, corrupted last byte) covers that for the engine and Raft log.
-* macOS `fsync` does not flush the drive cache; "strict" mode uses `F_FULLFSYNC`. Results record which was used.
+* macOS `fsync(2)` does not flush the drive cache; `--strict-fsync` uses `F_FULLFSYNC` (what Rust's `File::sync_data` would call on its own). Results record which was used. RocksDB's `sync=true` and rkv's plain-fsync mode are *similar* but not proven equivalent, so the headline S1 comparison disables fsync on both sides and reports the fsync runs separately.
 * Benchmarks are closed-loop; latency is measured under saturation without coordinated-omission correction.
 
 ## Consistency

@@ -3,3 +3,10 @@ bench/results/
 .venv/
 *.swp
 .DS_Store
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+deploy/cloud/terraform/.terraform/
+deploy/cloud/terraform/.terraform.lock.hcl
+deploy/cloud/terraform/terraform.tfstate*
+*.log
