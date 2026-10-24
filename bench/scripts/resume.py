@@ -71,7 +71,7 @@ bullet(11, "Wrote a Kubernetes operator (kube-rs) for rolling upgrades with zero
 # review or by the compiler are in BUGS_FOUND.md for honesty but are not claimed as testing wins.
 bugs_md = open(os.path.join(ROOT, "docs", "BUGS_FOUND.md")).read() if os.path.exists(os.path.join(ROOT, "docs", "BUGS_FOUND.md")) else ""
 entries = re.split(r"^## BUG-", bugs_md, flags=re.M)[1:]
-test_kw = re.compile(r"(property test|model-based|integration test|mutation testing|smoke|sanity check|simulation)", re.I)
+test_kw = re.compile(r"(property test|model-based|integration test|mutation testing|smoke|sanity check|simulation|fault-injection)", re.I)
 nb = 0
 for e in entries:
     m = re.search(r"\*\*Found by:\*\*(.*?)(?:\n- \*\*|\n\n)", e, re.S)

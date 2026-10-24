@@ -37,16 +37,20 @@ deploy() {
     R $h "chmod +x /tmp/rkv-server /tmp/kvctl /tmp/rkv-bench; mkdir -p $RESULTS"
   done
   i=1; for h in $HOSTS; do
-    R $h "rm -rf /var/lib/rkv/n$i; mkdir -p /var/lib/rkv/n$i; nohup /tmp/rkv-server --id $i --addr $h:20160 --http $h:20180 --data /var/lib/rkv/n$i --peers $peers --strict-fsync > /var/log/rkv-n$i.log 2>&1 < /dev/null &"
+    R $h "rm -rf /var/lib/rkv/n$i; mkdir -p /var/lib/rkv/n$i; nohup /tmp/rkv-server --id $i --addr $h:20160 --http $h:20180 --data /var/lib/rkv/n$i --peers $peers --election-tick ${ELECTION_TICK:-10} --strict-fsync > /var/log/rkv-n$i.log 2>&1 < /dev/null &"
     i=$((i+1)); done
   [ "$DRY_RUN" = 1 ] || sleep 8
   R $CLIENT "/tmp/kvctl --seeds $seeds put n1-probe ok && /tmp/kvctl --seeds $seeds get n1-probe" || { echo "cluster did not come up; see /var/log/rkv-n*.log"; exit 4; }
 }
 r1() {
   echo "### N1/R1: throughput and latency vs injected network delay and loss"
-  for delay in $(pick "0 10" "0 1 10 50"); do for loss in $(pick "0" "0 1"); do
+  for delay in ${DELAYS:-$(pick "0 10" "0 1 10 50")}; do
+    # election timeout must exceed a few round trips or the leader loses its quorum to late heartbeats: scale it with the injected delay
+    et=10; [ "$delay" -ge 10 ] && et=20; [ "$delay" -ge 50 ] && et=60
+    ELECTION_TICK=$et deploy
+    for loss in ${LOSSES:-$(pick "0" "0 1")}; do
     for h in $HOSTS; do bash "$D/netem.sh" $h add $delay $loss; done
-    R $CLIENT "/tmp/rkv-bench cluster --seeds $seeds --workload a --records $(pick 2000 50000) --secs $(pick 10 60) --clients $(pick 8 64) --id N1-r1-d${delay}ms-l${loss}pct --scope-label '$label; tc netem delay=${delay}ms loss=${loss}%' --out $RESULTS"
+    R $CLIENT "/tmp/rkv-bench cluster --seeds $seeds --workload a --records $(pick 2000 50000) --secs $(pick 10 60) --clients $(pick 8 64) --id N1-r1-d${delay}ms-l${loss}pct --scope-label '$label; tc netem delay=${delay}ms loss=${loss}% (election timeout ${et}x20ms)' --out $RESULTS"
   done; done
   for h in $HOSTS; do bash "$D/netem.sh" $h clear; done
 }
@@ -86,8 +90,8 @@ flame() {
 
 case "$STEP" in
   check) check ;;
-  r1) check; deploy; r1 ;; r2) check; deploy; r2 ;; disk) check; deploy; disk ;; flame) check; deploy; flame ;;
-  all) check; deploy; r1; r2; disk; flame ;;
+  r1) check; r1 ;; r2) check; deploy; r2 ;; disk) check; deploy; disk ;; flame) check; deploy; flame ;;
+  all) check; deploy; r1; deploy; r2; disk; flame ;;
   *) echo "usage: n1.sh [check|r1|r2|disk|flame|all]"; exit 2 ;;
 esac
 echo "done. results in $RESULTS on the client host"

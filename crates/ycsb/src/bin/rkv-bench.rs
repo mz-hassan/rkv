@@ -587,7 +587,13 @@ async fn run_cluster(a: &Args) {
         hs.push(tokio::spawn(async move {
             let (lo, hi) = (t * per, if t == nclients as u64 - 1 { records } else { t * per + per });
             for i in lo..hi {
-                c.put(&key_for(i), &value_for(i, vsize)).await.expect("load put");
+                // the cluster may be mid-election (that is part of what some benchmarks inject): retry before giving up
+                let mut tries = 0;
+                while let Err(e) = c.put(&key_for(i), &value_for(i, vsize)).await {
+                    tries += 1;
+                    assert!(tries < 40, "load put kept failing: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
             }
         }));
     }

@@ -62,6 +62,38 @@ connections alive; fixed by running each test node on its own runtime and droppi
 - **Found by:** the compiler (`future cannot be sent between threads safely`); it would also have deadlocked on leader redirect.
 - **Fix:** read the address count into a local before the retry loop.
 
+## BUG-010: a leader that lost leadership left its pending client requests hanging
+- **Found by:** end-to-end fault-injection test on a Linux VM: leader isolated with `iptables` (kernel-level), client-observed
+  failover window measured. Every trial came out at ~5.0 s instead of ~0.3 s, i.e. the server-side proposal timeout.
+  The earlier local failover test (`kill -9`) could not show it: killing a process drops its connections, a partition does not.
+- **Root cause:** `raft-driver` decided "did I just lose leadership?" at the *start* of `drive()`, but a step-down caused by
+  CheckQuorum or a higher-term message happens in `tick()`/`step()` *before* `drive()` runs, so by then the node already looked like a
+  follower and its pending proposals and ReadIndex requests were never failed. Clients waited for their timeout on a node that
+  could never commit.
+- **Fix:** remember the role seen at the end of the previous `drive()` (`was_leader`) and fail pending work when it changes.
+- **Regression test:** `isolated_leader_fails_pending_proposals_fast` (fails on the old code, passes on the fix; verified both ways).
+- **Effect on the measurement:** isolated-leader failover ~5000 ms -> ~280 ms (smoke figure, 5 trials; the real R2/N1 run is separate).
+
+## BUG-011: disk-fault injection silently injected nothing (tooling)
+- **Found by:** reading the smoke output critically: the `dm-flakey` run reported 0 client errors and the faulty node's log showed
+  no failure. Probing the device directly showed `/mnt/flaky` was not mounted.
+- **Root cause:** in the simulated-machines mode every "machine" command runs under `ip netns exec`, which uses a *private mount
+  namespace*: the mount made there vanished when the command ended, so the data directory was on the VM's ordinary disk.
+- **Fix:** device-mapper/mount setup runs on the real host. After the fix a lone server on the flaky device fail-stops
+  (`raft driver fatal storage error`), and in the 3-node run the faulty node panicked with `wal write failed: Input/output error`
+  while the other two kept serving (0 client errors).
+- **Why it matters:** a fault-injection test that injects nothing looks like a pass. Always verify the fault actually fires.
+
+## BUG-012: benchmark and cloud-script fragility found by real runs (tooling)
+- The benchmark load phase panicked on the first error, so a cluster mid-election aborted the run; it now retries.
+- A 50 ms delay + 1% loss run failed because the election timeout (200-400 ms) was shorter than a few round trips, so the leader
+  kept losing its quorum: correct behaviour for badly tuned timeouts. The script now scales the election timeout with the
+  injected delay and records it in the result label.
+- `R()` quoted commands with single quotes (breaks on `awk '...'`); the R2 script isolated node 1 instead of the leader; deploy
+  overwrote a running binary ("Text file busy") and could not stop root-owned servers; `pkill -f` matched its own shell
+  (twice); a `sed` rename made a helper function call itself (infinite recursion, only reachable in ssh mode, caught by dry-run).
+- **Found by:** running every step against a real Linux machine at smoke scale before any long run.
+
 ## BUG-009b: "non-strict" fsync on macOS was actually a full drive-cache flush
 - **Found by:** a sanity check of the RocksDB baseline: with `sync=true` it reported ~109k ops/s against ~0.7k for rkv with the same
   nominal durability. The gap was too big to be an engine difference.

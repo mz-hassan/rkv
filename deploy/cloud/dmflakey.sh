@@ -7,7 +7,7 @@ source "$(dirname "$0")/lib.sh"
 host="$1"; act="$2"
 # Device-mapper and mounts are host-wide. In MODE=netns a "host" is only a network namespace, and `ip netns exec` gives
 # commands a PRIVATE mount namespace (a mount made there vanishes), so disk setup must run on the real host.
-H() { if [ "$MODE" = netns ]; then echo "+ [host] $*" >&2; [ "$DRY_RUN" = 1 ] || sudo bash -c "$*"; else H "$*"; fi; }
+H() { if [ "$MODE" = netns ]; then echo "+ [host] $*" >&2; [ "$DRY_RUN" = 1 ] || sudo bash -c "$*"; else R "$host" "$*"; fi; }
 case "$act" in
   up) f="$3"; mb="$4"; up="$5"; down="$6"
       H "umount /mnt/flaky 2>/dev/null || true; dmsetup remove flaky 2>/dev/null || true; losetup -j $f 2>/dev/null | cut -d: -f1 | xargs -r losetup -d; rm -f $f"   # idempotent: clean up any previous run
