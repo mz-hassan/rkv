@@ -83,6 +83,8 @@ pub struct Store {
     tombstones: Mutex<HashSet<u64>>,
     next_local_id: AtomicU64,
     closed: std::sync::atomic::AtomicBool,
+    /// wall-clock ms of the last successful PD heartbeat (0 = never); an empty store is "ready" once it is registered with PD
+    pub pd_ok_ms: AtomicU64,
 }
 
 pub fn now_ms() -> u64 {
@@ -150,6 +152,7 @@ impl Store {
             tombstones: Mutex::new(tombs),
             next_local_id: AtomicU64::new(1),
             closed: std::sync::atomic::AtomicBool::new(false),
+            pd_ok_ms: AtomicU64::new(0),
         });
         let mut descs = load_ranges(&db);
         // a split can leave a child descriptor persisted without a running group: start every known range
@@ -559,6 +562,7 @@ impl Store {
             }
             match pd.heartbeat(HeartbeatReq { store: Some(store), ranges: reports }).await {
                 Ok(resp) => {
+                    self.pd_ok_ms.store(now_ms(), Ordering::Relaxed);
                     for s in &resp.stores {
                         if !s.addr.is_empty() {
                             self.addrs.write().insert(s.id, s.addr.clone());

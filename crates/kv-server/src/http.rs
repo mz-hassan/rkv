@@ -23,13 +23,20 @@ pub async fn serve(store: Arc<Store>, addr: String) {
             let (code, body) = match path.as_str() {
                 "/healthz" => ("200 OK", "ok\n".to_string()),
                 "/readyz" => {
+                    // ready = some range has a known leader, OR this store hosts no ranges yet but is registered with PD
+                    // (a freshly added store is empty until PD schedules replicas onto it; demanding a leader made
+                    // scale-out impossible under Kubernetes because the new pod could never become Ready)
                     let mut ready = false;
-                    for r in store.all_replicas() {
+                    let replicas = store.all_replicas();
+                    for r in &replicas {
                         if let Some(st) = r.handle.status().await {
                             if st.leader.is_some() {
                                 ready = true;
                             }
                         }
+                    }
+                    if replicas.is_empty() && store.pd.is_some() && crate::store::now_ms().saturating_sub(store.pd_ok_ms.load(Ordering::Relaxed)) < 10_000 {
+                        ready = true;
                     }
                     if ready {
                         ("200 OK", "ready\n".to_string())

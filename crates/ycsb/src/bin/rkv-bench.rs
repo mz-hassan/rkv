@@ -433,6 +433,16 @@ fn run_s2_sim(a: &Args) {
     }
 }
 
+/// Ledger ids from COMPLETE (newline-terminated) lines only: a torn final line is ignored.
+fn complete_ledger_ids(path: &str) -> Vec<u64> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let complete = match text.rfind('\n') {
+        Some(i) => &text[..i],
+        None => return vec![],
+    };
+    complete.lines().filter_map(|l| l.parse().ok()).collect()
+}
+
 fn run_s2_writer(a: &Args) {
     let dir = a.s("--dir", "");
     let ledger = a.s("--ledger", "");
@@ -440,14 +450,16 @@ fn run_s2_writer(a: &Args) {
     let db = Db::open(Options { sync, memtable_size: 1 << 20, ..Options::default() }, OsFs::new_arc(a.flag("--strict-fsync")), &dir).unwrap();
     use std::io::Write;
     let mut lf = std::fs::OpenOptions::new().create(true).append(true).open(&ledger).unwrap();
-    let start = std::fs::read_to_string(&ledger).map(|s| s.lines().count() as u64).unwrap_or(0);
+    let start = complete_ledger_ids(&ledger).len() as u64;
     let mut i = start;
     loop {
         let k = format!("key{i:010}");
         let v = format!("value-{i}-{}", "x".repeat((i % 200) as usize));
         db.put(k.as_bytes(), v.as_bytes()).unwrap();
         // ack observed: record it (ledger ⊆ acked, which is the safe direction)
-        writeln!(lf, "{i}").unwrap();
+        // ONE write syscall per line: `writeln!` on an unbuffered File issues the digits and the newline separately, and a kill -9
+        // between them left a torn line that the next append glued onto (e.g. "9336" + "9337" -> id 93369337): a bogus "lost write"
+        lf.write_all(format!("{i}\n").as_bytes()).unwrap();
         i += 1;
     }
 }
@@ -476,18 +488,29 @@ fn run_s2_driver(a: &Args) {
         let t = Instant::now();
         let db = Db::open(Options { sync: SyncPolicy::Group, ..Options::default() }, OsFs::new_arc(false), &dbdir).unwrap();
         recov.record_us(t.elapsed().as_micros() as u64);
-        let ids: Vec<u64> = std::fs::read_to_string(&ledger).unwrap_or_default().lines().filter_map(|l| l.parse().ok()).collect();
+        let ids: Vec<u64> = complete_ledger_ids(&ledger);
+        let max_id = ids.iter().copied().max().unwrap_or(0);
+        let mut shown = 0;
         for i in &ids {
             checked += 1;
             let k = format!("key{i:010}");
             let want = format!("value-{i}-{}", "x".repeat((*i % 200) as usize));
-            if db.get(k.as_bytes()).unwrap().as_deref() != Some(want.as_bytes()) {
+            let got = db.get(k.as_bytes()).unwrap();
+            if got.as_deref() != Some(want.as_bytes()) {
                 violations += 1;
+                if shown < 4 && std::env::var("RKV_S2_DEBUG").is_ok() {
+                    shown += 1;
+                    eprintln!(
+                        "VIOLATION id={i} (ledger max id {max_id}, ledger lines {}) found={:?}",
+                        ids.len(),
+                        got.as_ref().map(|g| String::from_utf8_lossy(&g[..g.len().min(40)]).into_owned())
+                    );
+                }
             }
         }
         db.close();
     }
-    let total_acked = std::fs::read_to_string(&ledger).map(|s| s.lines().count()).unwrap_or(0);
+    let total_acked = complete_ledger_ids(&ledger).len();
     let body = json!({
         "bench": "crash-consistency-sigkill",
         "config": { "iterations": iters, "fsync_policy": sync },

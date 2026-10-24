@@ -1,0 +1,9 @@
+# Same runtime image as Dockerfile, but copies binaries you already built with `cargo build --release` (no Rust toolchain in the image).
+# docker build -t rkv:dev -f deploy/docker/Dockerfile.prebuilt .      (from the repo root, after building on a Linux host)
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+COPY target/release/rkv-server target/release/rkv-pd target/release/kvctl target/release/rkv-bench target/release/rkv-chaos target/release/rkv-sim /usr/local/bin/
+COPY deploy/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh && mkdir -p /data
+EXPOSE 2379 20160 20180
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -613,8 +613,10 @@ impl Pd {
         }
         // 5. replica balance (one move per round)
         if balance && alive.len() > replication && m.pending.len() + new_pending.len() < max_ops {
-            let (maxs, maxn) = counts.iter().max_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap();
-            let (mins, minn) = counts.iter().min_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap();
+            // only stores that may receive replicas take part: a store being drained (evict_store) or dead must not be picked as the
+            // "least loaded" target, otherwise balancing adds replicas back to a store that is being emptied and the drain never ends
+            let (maxs, maxn) = counts.iter().filter(|(s, _)| is_alive(**s)).max_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap();
+            let (mins, minn) = counts.iter().filter(|(s, _)| is_alive(**s)).min_by_key(|(s, n)| (**n, **s)).map(|(s, n)| (*s, *n)).unwrap();
             if maxn >= minn + 2 {
                 if let Some(e) = entries.iter().find(|e| {
                     !m.pending.contains_key(&e.info.id)

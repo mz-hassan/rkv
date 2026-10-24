@@ -291,13 +291,19 @@ async fn main() {
             "presplit" => {
                 let c = raw();
                 for k in &a {
-                    let info = c.router.locate(k.as_bytes()).await.map_err(|e| e.to_string())?;
-                    if info.start == k.as_bytes() {
-                        continue; // already a boundary
-                    }
                     let mut done = false;
-                    // a freshly split child may not have elected a leader yet: retry for a few seconds
-                    for _attempt in 0..20 {
+                    // a split is only visible to PD (and to our route cache) after the next heartbeat, and a freshly split child
+                    // has to elect a leader: re-resolve the range on EVERY attempt instead of reusing a stale one
+                    for attempt in 0..40 {
+                        if attempt > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                            c.router.refresh_all().await.map_err(|e| e.to_string())?;
+                        }
+                        let info = c.router.locate(k.as_bytes()).await.map_err(|e| e.to_string())?;
+                        if info.start == k.as_bytes() {
+                            done = true; // already a boundary (possibly because an earlier attempt succeeded)
+                            break;
+                        }
                         for addr in all_store_addrs(&pd, &seeds).await? {
                             let r = AdminClient::new(::kv_client::pd::channel(&addr)?)
                                 .split_range(SplitReq { range_id: info.id, split_key: k.as_bytes().to_vec() })
@@ -312,13 +318,11 @@ async fn main() {
                         if done {
                             break;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        c.router.refresh_all().await.map_err(|e| e.to_string())?;
                     }
                     if !done {
                         return Err(format!("could not split at {k}"));
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await; // let the child group elect
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await; // let PD learn the new range before the next key
                     c.router.refresh_all().await.map_err(|e| e.to_string())?;
                 }
                 println!("presplit done");

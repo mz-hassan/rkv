@@ -17,5 +17,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

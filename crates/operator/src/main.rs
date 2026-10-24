@@ -118,19 +118,24 @@ async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error>
     let partition = sts.spec.as_ref().and_then(|s| s.update_strategy.as_ref()).and_then(|u| u.rolling_update.as_ref()).and_then(|r| r.partition).unwrap_or(0);
     let want = obj.spec.store_replicas;
     let min_voters = (obj.spec.replication.max(1) as usize).min(cur.max(1) as usize);
-    let pp = PatchParams::apply("rkv-operator").force();
     let mut phase = "Ready".to_string();
     let mut message = String::new();
     let mut requeue = Duration::from_secs(30);
 
+    // The StatefulSet is created by kustomize/kubectl; the operator only adjusts replicas, the update partition and the image.
+    // Use a STRATEGIC MERGE patch for that. (An earlier version used server-side apply: SSA gives the applying manager ownership
+    // of everything it sends and then DELETES owned fields that a later apply omits, which erased the container image, env and
+    // probes and made the operator flap. Merge patches have no ownership semantics.)
     let patch_sts = |body: serde_json::Value| {
         let stores = stores.clone();
-        let pp = pp.clone();
-        async move { stores.patch("rkv-store", &pp, &Patch::Apply(&body)).await }
+        async move {
+            tracing::info!(body = %body, "patching statefulset");
+            stores.patch("rkv-store", &PatchParams::default(), &Patch::Strategic(&body)).await
+        }
     };
+    tracing::debug!(cur, want, ready, updated, partition, sts_image = %sts_image(&sts), spec_image = %obj.spec.image, "reconcile inputs");
     let apply_body = |replicas: i32, image: Option<&str>, partition: i32| {
-        let mut b = json!({ "apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": { "name": "rkv-store", "namespace": ns },
-            "spec": { "replicas": replicas, "updateStrategy": { "type": "RollingUpdate", "rollingUpdate": { "partition": partition } } } });
+        let mut b = json!({ "spec": { "replicas": replicas, "updateStrategy": { "type": "RollingUpdate", "rollingUpdate": { "partition": partition } } } });
         if let Some(img) = image {
             b["spec"]["template"] = json!({ "spec": { "containers": [{ "name": "store", "image": img }] } });
         }
@@ -139,7 +144,7 @@ async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error>
 
     if want > cur {
         // scale out: the PD scheduler spreads replicas onto the new stores
-        patch_sts(apply_body(want, None, partition)).await?;
+        patch_sts(apply_body(want, Some(&obj.spec.image), partition)).await?;
         phase = "ScalingOut".into();
         message = format!("storeReplicas {cur} -> {want}");
         requeue = Duration::from_secs(5);
@@ -151,7 +156,7 @@ async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error>
         let h = pd_health(&ns, 3, 1).await?;
         let left = h.store_ranges.get(&victim).copied().unwrap_or(0);
         if left == 0 {
-            patch_sts(apply_body(cur - 1, None, partition)).await?;
+            patch_sts(apply_body(cur - 1, Some(&obj.spec.image), partition)).await?;
             let _ = pd.set_config("evict_store", "0").await;
             message = format!("store {victim} drained and removed");
         } else {
@@ -170,18 +175,30 @@ async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error>
         phase = "Upgrading".into();
         let healthy = ready == cur && pd_health(&ns, 3, min_voters).await.map(|h| h.stores_alive as i32 == cur && h.ranges_ok).unwrap_or(false);
         if healthy && partition > 0 {
-            patch_sts(apply_body(cur, None, partition - 1)).await?;
+            patch_sts(apply_body(cur, Some(&obj.spec.image), partition - 1)).await?;
             message = format!("released pod {} (partition {} -> {})", partition - 1, partition, partition - 1);
         } else {
             message = format!("waiting for health before releasing the next pod (ready {ready}/{cur}, partition {partition})");
         }
         requeue = Duration::from_secs(4);
     } else {
+        // everything matches the spec: only now is the cluster "Ready" - every pod ready and every store alive in PD
         let h = pd_health(&ns, 3, min_voters).await;
-        message = match h {
-            Ok(h) => format!("{} stores alive, {} ranges, ranges healthy: {}", h.stores_alive, h.ranges, h.ranges_ok),
-            Err(e) => format!("PD not reachable: {e}"),
-        };
+        match h {
+            Ok(h) if ready == cur && h.stores_alive as i32 == cur && h.ranges_ok => {
+                message = format!("{} stores alive, {} ranges, ranges healthy: {}", h.stores_alive, h.ranges, h.ranges_ok);
+            }
+            Ok(h) => {
+                phase = "Stabilizing".into();
+                message = format!("waiting: pods ready {ready}/{cur}, stores alive {}/{cur}, ranges healthy: {}", h.stores_alive, h.ranges_ok);
+                requeue = Duration::from_secs(3);
+            }
+            Err(e) => {
+                phase = "Stabilizing".into();
+                message = format!("PD not reachable: {e}");
+                requeue = Duration::from_secs(3);
+            }
+        }
     }
 
     let status = RkvClusterStatus {
@@ -191,8 +208,20 @@ async fn reconcile(obj: Arc<RkvCluster>, ctx: Arc<Ctx>) -> Result<Action, Error>
         image: sts_image(&sts),
         last_reconcile_ms: t0.elapsed().as_millis() as u64,
     };
-    clusters.patch_status(&obj.name_any(), &PatchParams::default(), &Patch::Merge(json!({ "status": status }))).await?;
-    tracing::info!(cluster = %obj.name_any(), %phase, %message, reconcile_ms = status.last_reconcile_ms, "reconciled");
+    // Only write status when something meaningful changed: our own status write re-triggers reconciliation, so writing
+    // an ever-changing timestamp would make the controller spin.
+    let changed = obj
+        .status
+        .as_ref()
+        .map(|o| {
+            (o.phase.as_str(), o.message.as_str(), o.ready_stores, o.image.as_str())
+                != (status.phase.as_str(), status.message.as_str(), status.ready_stores, status.image.as_str())
+        })
+        .unwrap_or(true);
+    if changed {
+        clusters.patch_status(&obj.name_any(), &PatchParams::default(), &Patch::Merge(json!({ "status": status }))).await?;
+        tracing::info!(cluster = %obj.name_any(), %phase, %message, reconcile_ms = status.last_reconcile_ms, "reconciled");
+    }
     Ok(Action::requeue(requeue))
 }
 
@@ -204,6 +233,9 @@ fn error_policy(_obj: Arc<RkvCluster>, err: &Error, _ctx: Arc<Ctx>) -> Action {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into())).init();
+    // kube pulls rustls without choosing a crypto backend; with none selected rustls panics at the first TLS use
+    // (found by the first run against a real cluster). Pick one explicitly.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     if std::env::args().nth(1).as_deref() == Some("crd") {
         println!("{}", serde_json::to_string_pretty(&RkvCluster::crd())?);
         return Ok(());

@@ -94,6 +94,57 @@ connections alive; fixed by running each test node on its own runtime and droppi
   (twice); a `sed` rename made a helper function call itself (infinite recursion, only reachable in ssh mode, caught by dry-run).
 - **Found by:** running every step against a real Linux machine at smoke scale before any long run.
 
+## BUG-013: the Kubernetes operator crashed at startup (Rustls crypto provider)
+- **Found by:** first run of the operator against a real cluster (kind on an Azure VM): `CrashLoopBackOff`, panic "Could not
+  automatically determine the process-level CryptoProvider from Rustls crate features".
+- **Fix:** install the `ring` provider explicitly at startup. A dry run and a successful build could never show this.
+
+## BUG-014: the operator's server-side-apply patches erased the StatefulSet's container spec and made it flap
+- **Found by:** the same first real run: the StatefulSet generation climbed ~20/s, pods were recreated in a loop, a controller
+  revision showed a template with **no image**, and the CR status read `image: ""`.
+- **Root cause:** the operator used Kubernetes *server-side apply* with partial bodies. SSA gives the applying manager ownership of
+  everything it sends and **deletes owned fields that a later apply omits**, so patches that carried only `replicas`/`partition`
+  removed the image (and, once ownership migrated from `kubectl apply`, much more). The two branches of the upgrade logic then
+  undid each other.
+- **Fix:** adjust only `replicas`, the update `partition` and the image with strategic-merge patches (no ownership semantics), and
+  write CR status only when it actually changed (our own status write re-triggers reconciliation).
+- **Note:** diagnosis was delayed ~1 h by BUG-017 (the cluster kept running the old operator).
+
+## BUG-015: the operator reported `Ready` before the new pods or stores were healthy
+- **Found by:** the K1 script's scale-out wait returning after 0 s. **Fix:** `Ready` now requires every pod ready and every store
+  alive in PD and ranges healthy; otherwise phase `Stabilizing`.
+
+## BUG-016: an empty store could never become Ready, so scale-out was impossible on Kubernetes
+- **Found by:** K1 scale-out: the two new store pods stayed `0/1` for 10 minutes; PD showed them alive with 0 ranges.
+- **Root cause:** `/readyz` required "some range has a known leader". A freshly added store hosts no ranges until PD schedules
+  replicas onto it, so its readiness probe failed forever.
+- **Fix:** ready = some range has a leader, OR the store hosts no ranges and its last PD heartbeat succeeded. After the fix: 5/5
+  pods ready in 8 s.
+
+## BUG-017: the cluster ran stale code because of Docker's legacy build cache (tooling)
+- **Found by:** noticing that the image ID never changed across "fixes", then comparing the checksum of the binary inside the image
+  with the one on disk. With the legacy builder (no buildx) a `COPY` of a rebuilt binary silently reused an old layer.
+- **Fix:** `docker build --no-cache` for prebuilt images in `k1.sh`.
+- **Lesson:** verify the artifact that is actually deployed, not the one that was built.
+
+## BUG-018: PD's replica balancer undid store draining, so scale-in never finished
+- **Found by:** K1 scale-in: "draining store 5: 2 ranges left" for 9 minutes, with learners repeatedly appearing on store 5.
+- **Root cause:** the balance rule chose the "least loaded" store from all stores that hold replicas, including the store marked
+  `evict_store`, and kept adding replicas back onto it while other rules removed them.
+- **Fix:** only stores that may receive replicas take part in balancing.
+
+## BUG-019: `kvctl presplit` reused a stale range after the first split (tooling)
+- **Found by:** K1: "could not split at bank00000050". A split is visible to PD only after the next heartbeat and the new child
+  must elect a leader; the retry loop re-sent the old range id forever. **Fix:** re-resolve the range on every attempt.
+
+## BUG-020: the SIGKILL crash-consistency test reported 13,675 false "lost writes" (test harness)
+- **Found by:** the overnight run: `S2-sigkill` exited non-zero. Diagnostics showed one impossible id (93369337) reappearing in
+  every iteration, always in the *test's ledger*, never a missing database key.
+- **Root cause:** `writeln!` on an unbuffered file makes two `write` syscalls (digits, then newline). A `kill -9` between them
+  left "9336" with no newline and the next append glued "9337\n" onto it. No data was lost.
+- **Fix:** one write per ledger line; ignore a torn final line. The invalid result set is kept under `bench/invalid/` for
+  transparency; the corrected re-run is a separate result. 40 kill/recover cycles after the fix: 534,207 acknowledged keys, 0 violations.
+
 ## BUG-009b: "non-strict" fsync on macOS was actually a full drive-cache flush
 - **Found by:** a sanity check of the RocksDB baseline: with `sync=true` it reported ~109k ops/s against ~0.7k for rkv with the same
   nominal durability. The gap was too big to be an engine difference.

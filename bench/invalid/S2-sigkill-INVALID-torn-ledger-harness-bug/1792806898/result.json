@@ -1,0 +1,36 @@
+{
+  "bench": "crash-consistency-sigkill",
+  "config": {
+    "fsync_policy": "always",
+    "iterations": 500
+  },
+  "git_commit": "e55dddf",
+  "hardware": {
+    "arch": "aarch64",
+    "cores": 10,
+    "cpu": "Apple M5",
+    "memory_bytes": "25769803776",
+    "os": "Darwin 25.6.0"
+  },
+  "id": "S2-sigkill",
+  "labels": {
+    "faults": "REAL kill -9 (SIGKILL) of the writer process; page cache survives, so this does NOT test OS/power loss",
+    "scope": "storage engine only, local disk"
+  },
+  "results": {
+    "acked_keys_checked_cumulative": 1114403252,
+    "distinct_acked_keys": 4343628,
+    "iterations": 500,
+    "recovery_time": {
+      "count": 500,
+      "max_us": 20073,
+      "mean_us": 12436.644,
+      "p50_us": 12288,
+      "p90_us": 16128,
+      "p999_us": 19968,
+      "p99_us": 18432
+    },
+    "violations": 13675
+  },
+  "timestamp_unix": "1792806898"
+}
