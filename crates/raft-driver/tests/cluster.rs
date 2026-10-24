@@ -195,3 +195,30 @@ async fn membership_change_adds_a_node() {
     }
     panic!("membership change never completed");
 }
+
+/// BUG-010 regression: a leader that is cut off steps down via CheckQuorum inside tick() - BEFORE drive() runs - and its
+/// pending proposals must still fail fast with NotLeader instead of hanging until the caller's timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn isolated_leader_fails_pending_proposals_fast() {
+    let c = start(3);
+    let l = find_leader(&c).await;
+    let lid = l as u64 + 1;
+    c.handles[l].propose(1u64.to_le_bytes().to_vec()).await.unwrap();
+    // cut the leader off from both followers (both directions)
+    {
+        let mut b = c.net.blocked.lock().unwrap();
+        for o in 1..=3u64 {
+            if o != lid {
+                b.insert((lid, o));
+                b.insert((o, lid));
+            }
+        }
+    }
+    let started = std::time::Instant::now();
+    let r = tokio::time::timeout(Duration::from_secs(3), c.handles[l].propose(2u64.to_le_bytes().to_vec())).await;
+    match r {
+        Ok(Err(DriverError::NotLeader(_))) => {}
+        other => panic!("expected a prompt NotLeader from the isolated leader, got {other:?} after {:?}", started.elapsed()),
+    }
+    assert!(started.elapsed() < Duration::from_secs(2), "took {:?}", started.elapsed());
+}

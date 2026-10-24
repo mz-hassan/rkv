@@ -214,6 +214,7 @@ pub fn spawn_group(
         reads: BTreeMap::new(),
         read_waiters: vec![],
         next_ctx: 1,
+        was_leader: false,
         last_contact_ms,
     };
     tokio::spawn(task.run(rx));
@@ -232,6 +233,8 @@ struct GroupTask {
     read_waiters: Vec<(u64, oneshot::Sender<Result<u64, DriverError>>)>,
     next_ctx: u64,
     last_contact_ms: Arc<AtomicU64>,
+    /// role observed at the end of the previous drive(): a step-down can happen in tick()/step() BEFORE drive() runs
+    was_leader: bool,
 }
 
 impl GroupTask {
@@ -343,7 +346,7 @@ impl GroupTask {
 
     /// Returns false on a fatal storage error.
     fn drive(&mut self) -> bool {
-        let was_leader = self.raft.role() == Role::Leader;
+        let was_leader = self.was_leader || self.raft.role() == Role::Leader;
         while self.raft.has_ready() {
             let rd = self.raft.ready();
             if self.storage.save(&rd, self.opts.sync).is_err() {
@@ -387,7 +390,8 @@ impl GroupTask {
             }
         }
         // lost leadership: pending proposals/reads may never resolve
-        if was_leader && self.raft.role() != Role::Leader {
+        self.was_leader = self.raft.role() == Role::Leader;
+        if was_leader && !self.was_leader {
             let hint = self.raft.leader();
             for (_, p) in std::mem::take(&mut self.pending) {
                 let _ = p.tx.send(Err(DriverError::NotLeader(hint)));
