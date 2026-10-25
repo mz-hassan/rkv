@@ -10,3 +10,12 @@ deploy/cloud/terraform/.terraform/
 deploy/cloud/terraform/.terraform.lock.hcl
 deploy/cloud/terraform/terraform.tfstate*
 *.log
+
+# AI-assisted workflow notes and generated resume material (kept locally)
+prompts/
+RESUME_BULLETS.generated.md
+docs/RESUME_TEMPLATES.md
+docs/PROGRESS.md
+docs/TASKS.md
+.claude/
+CLAUDE.md
