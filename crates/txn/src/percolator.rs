@@ -304,12 +304,15 @@ pub fn gc_key<S: TxnStore>(s: &S, b: &mut Batch, key: &[u8], safe_point: u64) {
         if cts > safe_point {
             continue;
         }
-        if !kept_visible {
-            kept_visible = true;
-            match rec.kind {
-                WriteKind::Put => continue, // newest version visible at safe_point must stay
-                WriteKind::Delete | WriteKind::Rollback | WriteKind::Lock => {}
+        match rec.kind {
+            // the newest committed value at the safe point must stay; rollback/lock markers above it are only markers
+            WriteKind::Put if !kept_visible => {
+                kept_visible = true;
+                continue;
             }
+            // a delete as newest version hides everything older, so the tombstone and the older versions can all go
+            WriteKind::Delete => kept_visible = true,
+            WriteKind::Put | WriteKind::Rollback | WriteKind::Lock => {}
         }
         b.del(versioned_key(CF_WRITE, key, cts));
         if rec.kind == WriteKind::Put {
@@ -471,5 +474,20 @@ mod tests {
         assert_eq!(read(&s, b"g", 25).unwrap().unwrap(), b"2");
         assert_eq!(read(&s, b"g", 40).unwrap().unwrap(), b"3");
         assert_eq!(write_recs(&s, b"g", 10).len(), 2);
+    }
+
+    /// BUG-021: a rollback record newer than the safe point's visible version used to count as "the visible version",
+    /// so GC deleted the real committed value below it.
+    #[test]
+    fn gc_keeps_value_below_rollback_marker() {
+        let s = Mem::default();
+        do_txn(&s, &[(b"r", b"1000")], 10, 11).unwrap();
+        let mut b = Batch::default();
+        rollback(&s, &mut b, b"r", 20).unwrap();
+        s.apply(b);
+        let mut b = Batch::default();
+        gc_key(&s, &mut b, b"r", 30);
+        s.apply(b);
+        assert_eq!(read(&s, b"r", 40).unwrap().unwrap(), b"1000");
     }
 }

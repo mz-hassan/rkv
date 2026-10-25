@@ -3,7 +3,7 @@
 # growth after warm-up, so "no unbounded memory growth" is a measurement (backpressure: bounded inboxes, proposal limits,
 # write stalls). Pass criterion is judged in RESULTS.md: RSS growth after warm-up should flatten.
 source "$(dirname "$0")/lib.sh"; need rkv-bench rkv-server; banner "soak"
-SECS=$(pick 12 1800); INTERVAL=$(pick 2 10)
+SECS=$(pick 12 "${SOAK_SECS:-1800}"); INTERVAL=$(pick 2 10)
 cluster up 3; wait_ready
 if [ "$DRY_RUN" != 1 ]; then
   SAMPLES=$(mktemp)

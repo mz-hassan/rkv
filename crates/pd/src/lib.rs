@@ -467,6 +467,10 @@ impl Pd {
                     }
                 }
             }
+            // forget unlisted-timers of replicas this store no longer reports: otherwise a brand-new learner of the same range
+            // inherits the old timer and is garbage-collected the moment it first reports (BUG-026)
+            let reported: std::collections::HashSet<u64> = req.ranges.iter().filter_map(|r| r.info.as_ref().map(|i| i.id)).collect();
+            unlisted.retain(|(rid, st), _| *st != sender || reported.contains(rid));
             m.unlisted_since = unlisted;
             for c in &gc {
                 m.gc_sent.insert((c.range_id, sender), now);
@@ -561,6 +565,12 @@ impl Pd {
             let learners: Vec<&Peer> = e.info.peers.iter().filter(|p| p.learner).collect();
             let alive_voters = voters.iter().filter(|p| is_alive(p.store_id)).count();
             let cmd = |kind: u32, store: u64, key: Vec<u8>| (leader, PdCommand { kind, range_id: rid, store_id: store, split_key: key });
+            // 0. a learner on a store that is dead or being drained can never catch up and would block the range forever: drop it
+            if let Some(l) = learners.iter().find(|l| !is_alive(l.store_id)) {
+                new_cmds.push(cmd(3, l.store_id, vec![]));
+                new_pending.push((rid, 3));
+                continue;
+            }
             // 1. promote caught-up learners
             if let Some(l) = learners.iter().find(|l| {
                 m.reports.get(&(rid, l.store_id)).map(|(applied, _, at)| now.saturating_sub(*at) < 5000 && applied + 100 >= e.commit).unwrap_or(false)

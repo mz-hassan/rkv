@@ -865,36 +865,66 @@ impl Inner {
 
     fn scan_at(&self, start: &[u8], end: &[u8], ts: u64, limit: usize) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let (mem, imms, ver) = self.sources();
-        let mut srcs = vec![Src::Vec(mem.range(start, end).into_iter())];
-        for i in imms.iter().rev() {
-            srcs.push(Src::Vec(i.mem.range(start, end).into_iter()));
-        }
-        for f in ver.levels.iter().flatten() {
-            if !end.is_empty() && f.small_u() >= end {
-                continue;
+        // Copying a whole memtable per scan made short scans O(memtable). With a limit, copy only a bounded prefix of each
+        // memtable and retry with a larger one if the merge reaches the point where a truncated memtable stops being complete.
+        let mut cap = if limit > 0 { limit.saturating_mul(4).max(64) } else { usize::MAX };
+        loop {
+            let mut srcs = vec![];
+            let mut bound: Option<Vec<u8>> = None; // smallest last-key among truncated memtable sources
+            let mut add_mem = |m: &Memtable, srcs: &mut Vec<Src>| {
+                let (v, truncated) = m.range_n(start, end, cap);
+                if truncated {
+                    if let Some(last) = v.last() {
+                        let lk = last.ukey().to_vec();
+                        if bound.as_ref().map(|b| lk < *b).unwrap_or(true) {
+                            bound = Some(lk);
+                        }
+                    }
+                }
+                srcs.push(Src::Vec(v.into_iter()));
+            };
+            add_mem(&mem, &mut srcs);
+            for i in imms.iter().rev() {
+                add_mem(&i.mem, &mut srcs);
             }
-            if f.large_u() < start {
-                continue;
+            for f in ver.levels.iter().flatten() {
+                if !end.is_empty() && f.small_u() >= end {
+                    continue;
+                }
+                if f.large_u() < start {
+                    continue;
+                }
+                srcs.push(Src::Sst(f.reader.iter(start, end)));
             }
-            srcs.push(Src::Sst(f.reader.iter(start, end)));
-        }
-        let mut m = Merge::new(srcs);
-        let mut out: Vec<(Vec<u8>, Vec<u8>)> = vec![];
-        let mut cur_done: Option<Vec<u8>> = None;
-        while let Some(e) = m.next_entry() {
-            if cur_done.as_deref() == Some(e.ukey()) || e.ts() > ts {
-                continue;
-            }
-            cur_done = Some(e.ukey().to_vec());
-            if e.kind == KIND_PUT {
-                out.push((e.ukey().to_vec(), e.value));
-                if limit > 0 && out.len() >= limit {
-                    break;
+            let mut m = Merge::new(srcs);
+            let mut out: Vec<(Vec<u8>, Vec<u8>)> = vec![];
+            let mut cur_done: Option<Vec<u8>> = None;
+            let mut incomplete = false;
+            while let Some(e) = m.next_entry() {
+                if let Some(b) = &bound {
+                    if e.ukey() >= b.as_slice() {
+                        incomplete = true; // a truncated memtable may hold more versions of this key and later keys
+                        break;
+                    }
+                }
+                if cur_done.as_deref() == Some(e.ukey()) || e.ts() > ts {
+                    continue;
+                }
+                cur_done = Some(e.ukey().to_vec());
+                if e.kind == KIND_PUT {
+                    out.push((e.ukey().to_vec(), e.value));
+                    if limit > 0 && out.len() >= limit {
+                        break;
+                    }
                 }
             }
+            m.check()?;
+            if incomplete {
+                cap = cap.saturating_mul(4);
+                continue;
+            }
+            return Ok(out);
         }
-        m.check()?;
-        Ok(out)
     }
 
     // ---------------- maintenance (flush + compaction), single worker

@@ -138,12 +138,32 @@ impl Memtable {
         out
     }
 
+    /// Like `range` but copies at most `max` entries. The flag says whether more entries in range were left behind, so callers
+    /// that merge several sources know this one is incomplete beyond its last returned key.
+    pub fn range_n(&self, start: &[u8], end: &[u8], max: usize) -> (Vec<Entry>, bool) {
+        let l = self.l.read();
+        let mut i = Self::seek_idx(&l, &make_ikey(start, u64::MAX));
+        let mut out = vec![];
+        while i != NIL {
+            let e = &l.nodes[i as usize].e;
+            if !end.is_empty() && ukey(&e.ikey) >= end {
+                break;
+            }
+            if out.len() >= max {
+                return (out, true);
+            }
+            out.push(e.clone());
+            i = l.nodes[i as usize].next[0];
+        }
+        (out, false)
+    }
+
     pub fn all(&self) -> Vec<Entry> {
         self.range(&[], &[])
     }
 
     pub fn has_tombstone_for(&self, uk: &[u8]) -> bool {
-        self.range(uk, &[]).first().map(|e| e.ukey() == uk && e.kind == KIND_DEL).unwrap_or(false)
+        self.range_n(uk, &[], 1).0.first().map(|e| e.ukey() == uk && e.kind == KIND_DEL).unwrap_or(false)
     }
 }
 

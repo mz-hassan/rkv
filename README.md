@@ -5,9 +5,10 @@
 > transactions**, and an unusually strong **verification story** (deterministic simulation, a hand-written linearizability checker,
 > real-process chaos, fuzzing, property tests).
 >
-> **Where things stand (2026-10-22):** all the code is written and tested; **no real benchmark has been run yet**. Every benchmark
-> is scripted, dry-run-checked and smoke-tested, and is waiting for you to run it (see [Next steps](#next-steps)). `RESULTS.md` is
-> generated from raw measurements only — until you run things it says `NOT RUN`, and that is the honest state.
+> **Where things stand (2026-10-25):** the system is built, tested and benchmarked. 30 issues were logged and fixed along the way
+> (16 of them product bugs found by testing; the rest are tooling, test-harness and benchmark-integrity bugs), and every measurement below comes from
+> raw result files (`bench/results/`, summarised in [`RESULTS.md`](RESULTS.md)). The story of how it got here, bug by bug, is in
+> [`docs/TIMELINE.md`](docs/TIMELINE.md). Open items are listed under [Honest limitations](#8-honest-limitations).
 
 ---
 
@@ -90,12 +91,12 @@ Deeper write-ups: `docs/deep-dives/` (raft, storage engine, transactions, simula
 |---|---|---|
 | Model-based property tests (`proptest` vs `BTreeMap`) incl. **crash + recovery**, leveled and tiered | LSM correctness | passing; 300,000 cases per style after fixing the bug it found |
 | `loom` model of the write-group protocol | the engine's one hand-rolled concurrent algorithm | passing (all interleavings of 3 writers) |
-| **Deterministic simulation** (6 fault profiles × many seeds): partitions, drops, duplicates, crashes with torn writes, fsync failure, clock drift, membership changes | Raft safety invariants on every step + linearizability of every client history + liveness after healing | clean on the unmodified code (earlier 18,000-seed sweep; a 72-run subset runs inside `cargo test`). **Re-run `make sim` for current numbers.** |
-| **Mutation testing of the verification itself** (inject bugs, require the suite to catch them) | proves the checkers can fail | caught: stale reads, ack-before-commit, missing dedup, unpersisted vote, vote without log check, commit on a minority. **Not caught: the Raft paper's "Figure 8" commit bug** (documented gap) |
+| **Deterministic simulation** (6 fault profiles × many seeds): partitions, drops, duplicates, crashes with torn writes, fsync failure, clock drift, membership changes | Raft safety invariants on every step + linearizability of every client history + liveness after healing | **0 violations in 40,000 seeds (289 simulated hours, ~125M client operations checked)** on the unmodified code; a 72-run subset runs inside `cargo test` |
+| **Mutation testing of the verification itself** (inject bugs, require the suite to catch them) | proves the checkers can fail | 6 of 7 injected bugs caught (stale reads, ack-before-commit, missing dedup, unpersisted vote, vote without log check, commit on a minority). **Not caught: the Raft paper's "Figure 8" commit bug** (documented gap) |
 | Linearizability checker unit + mutation tests | Wing-Gong/Lowe with memoisation | passing |
-| Real-process chaos (`rkv-chaos`) | `kill -9`, `SIGSTOP`, partitions, ring partitions, clock-rate skew, rolling restarts; histories checked by the same checker; bank-conservation audits under faults | works at smoke scale (e.g. 1,050 ops across 2 leader kills linearizable; 187 transfers across 3 kills, total conserved) |
+| Real-process chaos (`rkv-chaos`) | `kill -9`, `SIGSTOP`, partitions, ring partitions, clock-rate skew, rolling restarts; histories checked by the same checker; bank-conservation audits under faults | 7 fault types x 20 histories (about 2.6M operations), 0 linearizability violations; bank totals conserved under leader kills, partitions and mixed faults |
 | Integration tests over real gRPC | failover, restart-from-disk, split, merge, exactly-once, leases, PD-driven replication, cross-range bank transfers | passing |
-| Fuzzing (`cargo-fuzz`) | WAL, SSTable, manifest, Raft messages, replicated commands, protobuf requests | built and smoke-run (100k to 1.4M executions each in 8 s, no crash); long runs pending |
+| Fuzzing (`cargo-fuzz`) | WAL, SSTable, manifest, Raft messages, replicated commands, protobuf requests | 6 targets, about 1 hour total (~425M executions), no crash |
 
 **Bugs found along the way are logged in `docs/BUGS_FOUND.md`** with how each was found — including the honest ones that came from
 code review or the compiler. The headline one: a compaction bug that resurrected deleted keys, found by the property test.
@@ -120,52 +121,92 @@ scripts/cluster.sh down
 
 All commands, flags and the reproduction recipe: **`docs/HOW_TO_REPRODUCE.md`**.
 
-## 6. The benchmark plan (written, ready, *not yet run*)
+## 6. Results: what the measurements say
 
-Every row is a script that supports `DRY_RUN=1` (print commands) and `SCALE=smoke` (tiny, throwaway output). Targets are
-**hypotheses**, not results. Runtimes are rough estimates for full scale on an idle laptop.
+Full tables, plots and honesty labels: **[`RESULTS.md`](RESULTS.md)** (generated from raw files; nothing typed by hand). Cloud numbers
+come from one Azure 4-vCPU burstable VM with a single shared disk (all "nodes" are processes on it), so they are
+**disk-bound** and say little about a real network cluster. Crash tests ran on the MacBook.
 
-| ID | Question | Command | ~Time | Hypothesis (unverified) |
+**Storage engine vs RocksDB** (single node, 1M records, fsync off on both sides):
+
+| YCSB | rkv ops/s | RocksDB ops/s | rkv / RocksDB |
+|---|---|---|---|
+| A (50/50 read/update) | 175,843 | 148,555 | 118% |
+| B (95/5) | 675,921 | 730,588 | 93% |
+| C (read-only) | 919,222 | 888,114 | 104% |
+| D (read latest) | 722,409 | 785,114 | 92% |
+| E (short scans) | 13,889 | 154,212 | **9%** |
+| F (read-modify-write) | 162,927 | 141,713 | 115% |
+
+Reads and point writes are on par with RocksDB; **scans are the weak spot** (a known gap, see limitations). With fsync on every
+write rkv does 649 ops/s against RocksDB's 2,943; with group commit both reach about 3,000. Recovery replays a 321 MB log in 9.6 s.
+
+**Replicated cluster vs etcd** (same workload, same machine, 128 B values, fsync on):
+
+| nodes | mix | rkv ops/s | etcd ops/s | rkv / etcd |
 |---|---|---|---|---|
-| S1 | Single-node engine vs RocksDB (fsync **off** on both sides for the headline; fsync modes compared separately and labelled): YCSB A–F, p50/p99/p99.9, write/read/space amplification, Bloom FPR vs theory, cache hit ratio vs size, fsync-policy trade-off, leveled vs tiered, recovery time vs WAL size | `make bench-s1` (+ `make build-baselines`, `RKV_ROCKS=1`) | 2 h | within 0.3×–1.5× of RocksDB |
-| S2 | Do acknowledged writes survive crashes? simulated power loss ×5000, SIGKILL ×500, whole-cluster kill -9 | `make bench-s2` | 30 min | zero lost |
-| S3 | Memory under sustained load (soak) | `make bench-soak` | 30 min | RSS flat after warm-up |
-| R1 | Replicated throughput/latency: 1/3/5 nodes × mixes × value sizes, batching/pipelining on/off, ReadIndex vs lease vs follower reads, **vs etcd** | `make bench-r1 bench-etcd` | 3 h | 0.5×–1.5× of etcd (localhost, caveats) |
-| R2 | Failover unavailability window (p50/p95/p99 over 100 trials) for kill / pause / partition; election-timeout sweep; PreVote & CheckQuorum ablation; snapshot catch-up time | `make bench-r2` | 1–2 h | p50 ≈ 1.5× election timeout |
-| R3 | Linearizability under faults: simulation seeds + injected-bug suite + real-process histories | `make bench-r3` (`HISTORIES=200` for the full target) | 2 h (14 h full) | 0 violations; all mutants caught |
-| D1 | Sharding: throughput vs 1/4/16/64 ranges, split under load, hot-range handling | `make bench-d1` | 1.5 h | scales until laptop cores saturate |
-| D2 | Transactions: contention (Zipf θ) sweep, abort rate, write skew (SI vs serializable), lock recovery after coordinator crash, bank invariant under chaos, HLC vs oracle | `make bench-d2` | 1.5 h | write skew only under SI |
-| K1 | Operator-driven rolling upgrade and scale 3→5→3 on kind under a bank workload | `make bench-k1` | 1 h | zero invariant violations |
-| N1 | Real network: netem delay/loss, iptables leader isolation ×100, dm-flakey disk faults, flamegraphs | `HOSTS=... deploy/cloud/n1.sh all` | 4 h | deferred (Linux hosts) |
+| 3 | write | 1,238 | 1,680 | 74% |
+| 3 | 50/50 | 1,119 | 1,561 | 72% |
+| 3 | read | 16,060 | 10,946 | 147% |
+| 1 | write | 2,377 | 5,270 | 45% |
+| 1 | read | 29,166 | 16,415 | 178% |
 
-`make results resume` then writes `RESULTS.md` (tables + plots) and `RESUME_BULLETS.generated.md` — bullets only for experiments
-that have enough data (`NOT RUN — cannot claim` otherwise).
+Reads (ReadIndex) beat etcd; writes are 45 to 74% of etcd. Lease reads (28k ops/s) are 1.8x faster than ReadIndex reads (16k).
+On this disk-bound VM, batching and pipelining made little difference to write throughput (1,168 on vs 1,214 / 1,065 with one of them off).
 
-**Honesty rules baked into the tooling:** raw JSON in `bench/results/<ID>/<ts>/` with hardware, git commit, config and labels
-(*localhost vs multi-host*, *simulated vs real faults*, *fsync mode*); no number is typed into any document; smoke runs can never
-land in `bench/results`.
+**Failure behaviour:**
 
-## 7. Next steps
+| experiment | result |
+|---|---|
+| leader killed (`kill -9`), 20 trials | writes resume after p50 439 ms, p99 562 ms (election timeout 200 to 400 ms) |
+| leader partitioned from the others, 20 trials | p50 368 ms, p99 474 ms |
+| election timeout sweep | failover time scales with the timeout: p50 244 / 437 / 696 / 1,392 ms for 100 to 200 / 200 to 400 / 400 to 800 / 800 to 1,600 ms timeouts |
+| leader isolated with `iptables` on the cloud VM, 100 trials | p50 361 ms, p99 521 ms |
+| lagging replica catching up 100 MB through a snapshot | 1.8 s |
+| acknowledged-write loss | 0 in 5,000 simulated power losses, 500 `SIGKILL`s and 20 whole-cluster kills |
+| 6 cycles of draining, killing and re-adding two of five stores under load | bank total conserved (100,000 of 100,000), 69,785 transactions |
 
-Do these in order; each is one command. Use an idle, plugged-in machine (a laptop in a bag will throttle and spoil latency numbers).
+**Transactions** (bank transfers, 1,000 accounts, PD timestamps): every run conserved the total, including with leaders killed,
+partitions and mixed faults. Throughput is modest (11 to 97 commits/s; abort rate 13% at 8 clients to 68% at high contention),
+because each transaction takes several consensus round trips and the disk is shared. Snapshot isolation shows write skew in
+**500 of 500** doctor-on-call pairs; serializable mode shows **0 of 500**. Recovery after a crashed coordinator takes a median of
+524 ms (lock TTL 500 ms). The client-side HLC timestamp mode **does** lose money (8 of 1,000,000): it is documented as only as
+consistent as client clocks, and this run measures that cost.
 
-1. **Confirm the build on your machine:** `make build test lint dry-run` (≈10 min).
-2. **Consensus evidence first** (cheapest, most valuable): `make sim` then `make bench-r3` with the default `HISTORIES`; inspect any failing seed (`rkv-sim` prints it; replays deterministically) and log real findings in `docs/BUGS_FOUND.md`.
-3. **Storage:** `make bench-s1 bench-s2`; optionally `make build-baselines && RKV_ROCKS=1 make bench-s1` for the RocksDB comparison.
-4. **Replication & recovery:** `make bench-r2 bench-r1`, then `make bench-etcd` for the baseline.
-5. **Sharding & transactions:** `make bench-d1 bench-d2 bench-soak`.
-6. **Fuzz for an hour or more:** `SECS=900 make fuzz` (6 targets).
-7. **Generate the report:** `make results resume`; read `RESULTS.md`; keep the honesty labels with every number you quote.
-8. **Optional L1/L2/L3:** install Docker (`brew install docker colima && colima start --cpu 4 --memory 8`) → `make bench-k1`; Linux hosts → `deploy/cloud/n1.sh`; cloud → `deploy/cloud/terraform`.
-9. **Close the known gaps:** a targeted scenario for the Figure-8 commit bug; chunked snapshot transfer; PD-scheduled range merges; phantom protection for serializable range scans (all in `docs/LIMITATIONS.md`).
-10. **Before an interview:** read `docs/LEARNING_GUIDE.md` and be able to answer its 20 questions from this code (answers point at modules).
+**Sharding:** more ranges did not raise throughput here (write throughput fell from 1,715 ops/s at 1 range to 1,110 at 4 and 623 at
+16), because every store shares one disk and each range adds its own log. A range split during a 30-second write workload showed
+successful operations in every second (roughly 1,200 to 1,500 ops/s, lowest second 973), with no visible stall at the moment of the
+split. This experiment needs separate machines to show scaling.
 
-## 8. Honest limitations (full list in `docs/LIMITATIONS.md`)
+**Memory soak:** server RSS grew from about 55 MB to 650 to 780 MB during a sustained 10-minute write load, and was still growing
+slowly (2 to 9% in the second half), so it is not flat; not investigated further.
 
-Laptop-only numbers (processes share cores and one SSD) · faults injected in-process, not by kernel tools · `kill -9` is not a
-power-cut · lease reads assume bounded clock drift · serializable mode protects point reads only · snapshots are single messages ·
-no compression · the operator, Kubernetes manifests, Docker image and cloud scripts are validated statically but have never been
-run against a real cluster · the verification suite has one documented blind spot (Figure 8).
+### What this does and does not show
+* It shows a correct (as far as extensive testing can tell) replicated, transactional store that is competitive with RocksDB on
+  point operations and with etcd on reads, and that survives crashes, partitions and membership changes without losing data.
+* It does **not** show scaling across machines, behaviour on a real network, or production-grade write performance.
+
+`make results resume` regenerates `RESULTS.md` and `RESUME_BULLETS.generated.md` (bullets only where enough data exists).
+**Honesty rules baked into the tooling:** raw JSON in `bench/results/<ID>/<ts>/` with hardware, config and labels (localhost vs
+multi-host, simulated vs real faults, fsync mode); no number is typed into any document; smoke runs never land in `bench/results`.
+
+## 7. Next steps (all optional)
+
+1. **Re-run the timing-sensitive benchmarks on a quiet Mac or dedicated cloud hardware** (`scripts/preflight.sh`, then `make bench-s1 bench-r1`). The Azure numbers are disk-bound; local SSD numbers will differ.
+2. **Fix the scan gap** (YCSB-E is 9% of RocksDB): the merge iterator does too much work per short scan.
+3. **Run a full Kubernetes scale-in** (`make bench-k1`) now that the membership bugs it exposed are fixed; the local churn test (`bench/scripts/churn_local.sh`) already passes 6 cycles.
+4. **Long fuzzing** (`SECS=900 make fuzz`) and a targeted scenario for the Raft Figure-8 bug the simulator does not catch.
+5. **Real multi-machine network run** (`deploy/cloud/n1.sh`) to see sharding scale.
+6. **Before an interview:** read `docs/LEARNING_GUIDE.md` and `docs/TIMELINE.md`.
+
+## 8. Honest limitations
+
+Full list in `docs/LIMITATIONS.md`. The main ones: cluster benchmarks ran with all nodes on one machine and one disk · `kill -9` and
+the in-memory disk model are not a real power cut · scans are slow · snapshots are single in-memory messages (large values blow up
+memory) · serializable mode protects point reads only · HLC timestamp mode is only as consistent as client clocks · several R2
+variants (pause, and the no-CheckQuorum partition runs) recorded zero completed trials and should be ignored · the full Kubernetes
+scale-in run never completed end to end (it found six bugs, now fixed and covered by the local churn test) · the verification suite
+has one documented blind spot (Raft Figure 8).
 
 ## 9. Repository map
 

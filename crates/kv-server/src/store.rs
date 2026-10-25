@@ -58,6 +58,8 @@ pub struct Replica {
     pub conf_ver: AtomicU64,
     last_members: Mutex<BTreeSet<u64>>,
     was_member: std::sync::atomic::AtomicBool,
+    /// consecutive maintenance ticks in which the replica saw itself outside its group (see `maintenance`)
+    removed_ticks: std::sync::atomic::AtomicU32,
 }
 
 #[derive(Default)]
@@ -81,6 +83,9 @@ pub struct Store {
     pub metrics: Metrics,
     creating: Mutex<HashSet<u64>>,
     tombstones: Mutex<HashSet<u64>>,
+    /// ranges whose replica was removed from this store by a conf change (not merged away): PD may add the store back later,
+    /// so the tombstone is lifted when a current member's descriptor lists this store again (value = last attempt)
+    revivable: Mutex<HashMap<u64, std::time::Instant>>,
     next_local_id: AtomicU64,
     closed: std::sync::atomic::AtomicBool,
     /// wall-clock ms of the last successful PD heartbeat (0 = never); an empty store is "ready" once it is registered with PD
@@ -119,7 +124,7 @@ impl Store {
         let transport = GrpcTransport::new(cfg.store_id, addrs.clone());
         let (split_tx, split_rx) = mpsc::unbounded_channel();
         let pd = if cfg.pd_addrs.is_empty() { None } else { Some(Arc::new(PdClient::new(cfg.pd_addrs.clone()))) };
-        let tombs: HashSet<u64> = db
+        let tomb_rows: Vec<(u64, Vec<u8>)> = db
             .scan(
                 &{
                     let mut p = vec![CF_META];
@@ -134,8 +139,12 @@ impl Store {
                 0,
             )?
             .into_iter()
-            .filter_map(|(k, _)| k.get(k.len().saturating_sub(8)..).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes))
-            .collect();
+            .filter_map(|(k, v)| k.get(k.len().saturating_sub(8)..).and_then(|b| b.try_into().ok()).map(u64::from_be_bytes).map(|id| (id, v)))
+            .collect::<Vec<_>>();
+        // tombstones written when a conf change removed the replica (value "R") may be lifted again; merged-away ranges never
+        let revivable: HashMap<u64, std::time::Instant> =
+            tomb_rows.iter().filter(|(_, v)| v.as_slice() == b"R").map(|(id, _)| (*id, std::time::Instant::now())).collect();
+        let tombs: HashSet<u64> = tomb_rows.iter().map(|(id, _)| *id).collect();
         let store = Arc::new(Store {
             cfg: cfg.clone(),
             db: db.clone(),
@@ -150,6 +159,7 @@ impl Store {
             metrics: Metrics::default(),
             creating: Mutex::new(HashSet::new()),
             tombstones: Mutex::new(tombs),
+            revivable: Mutex::new(revivable),
             next_local_id: AtomicU64::new(1),
             closed: std::sync::atomic::AtomicBool::new(false),
             pd_ok_ms: AtomicU64::new(0),
@@ -216,6 +226,7 @@ impl Store {
             conf_ver: AtomicU64::new(1),
             last_members: Mutex::new(voters.clone()),
             was_member: std::sync::atomic::AtomicBool::new(voters.contains(&self.cfg.store_id)),
+            removed_ticks: std::sync::atomic::AtomicU32::new(0),
         });
         self.replicas.write().insert(id, rep.clone());
         Ok(rep)
@@ -319,7 +330,11 @@ impl Store {
             return;
         }
         if self.tombstones.lock().contains(&range_id) {
-            return;
+            let mut rv = self.revivable.lock();
+            match rv.get_mut(&range_id) {
+                Some(last) if last.elapsed() >= Duration::from_secs(2) => *last = std::time::Instant::now(),
+                _ => return,
+            }
         }
         if !self.creating.lock().insert(range_id) {
             return;
@@ -328,6 +343,9 @@ impl Store {
         let me = self.clone();
         tokio::spawn(async move {
             let res = me.create_on_demand(range_id, from_store).await;
+            if let Err(e) = &res {
+                tracing::warn!(range = range_id, from = from_store, "create replica on demand failed: {e}");
+            }
             me.creating.lock().remove(&range_id);
             if let Ok(rep) = res {
                 rep.handle.step(msg);
@@ -344,6 +362,16 @@ impl Store {
         let mut c = rkv_proto::admin_client::AdminClient::new(ch);
         let st = c.status(Empty {}).await.map_err(|e| e.to_string())?.into_inner();
         let info = st.ranges.into_iter().filter_map(|r| r.info).find(|i| i.id == range_id).ok_or("sender does not know the range")?;
+        if self.tombstones.lock().contains(&range_id) {
+            // a replica we removed earlier: only come back if the sender's current descriptor lists this store
+            if !info.peers.iter().any(|p| p.store_id == self.cfg.store_id) {
+                return Err("tombstoned and not a member".into());
+            }
+            self.tombstones.lock().remove(&range_id);
+            let mut wb = WriteBatch::new();
+            wb.delete(&tomb_key(range_id));
+            let _ = self.db.write(wb);
+        }
         self.create_replica_from_info(&info).map_err(|e| e.to_string())
     }
 
@@ -429,11 +457,21 @@ impl Store {
                     }
                 }
                 // removed from the group (we learned it from the log): tear the replica down
+                // A replica that is being (re)added replays the group's history, which can contain an old entry that removed this
+                // very store: it must not tear itself down on that transient state (BUG-025), only when the removal is the final
+                // word, i.e. it stays removed and caught up for ~10 s.
                 if members.contains(&self.cfg.store_id) {
                     rep.was_member.store(true, Ordering::Relaxed);
-                } else if rep.was_member.load(Ordering::Relaxed) && st.applied >= st.commit {
-                    self.destroy_replica(&rep).await;
-                    continue;
+                    rep.removed_ticks.store(0, Ordering::Relaxed);
+                } else if self.pd.is_none() && rep.was_member.load(Ordering::Relaxed) && st.applied >= st.commit {
+                    // with PD, removal is decided by PD's replica GC (it sees the leader's authoritative peer list); a replica
+                    // that replays history cannot tell locally whether an old removal entry is the final word
+                    if rep.removed_ticks.fetch_add(1, Ordering::Relaxed) >= 20 {
+                        self.destroy_replica(&rep).await;
+                        continue;
+                    }
+                } else {
+                    rep.removed_ticks.store(0, Ordering::Relaxed);
                 }
                 if st.role != Role::Leader {
                     continue;
@@ -463,6 +501,7 @@ impl Store {
         rep.handle.stop().await;
         self.replicas.write().remove(&rep.id);
         self.tombstones.lock().insert(rep.id);
+        self.revivable.lock().insert(rep.id, std::time::Instant::now());
         let d = rep.sm.desc();
         let mut wb = WriteBatch::new();
         wb.put(
@@ -471,13 +510,26 @@ impl Store {
                 k.truncate(k.len());
                 k
             },
-            b"1",
+            b"R",
         );
         for cf in RANGE_CFS {
             let (s, e) = cf_range(cf, &d.start, &d.end);
             for (k, _) in self.db.scan(&s, &e, 0).unwrap_or_default() {
                 wb.delete(&k);
             }
+        }
+        // per-replica metadata too: a replica that is re-added later must start from scratch, not from a stale applied index,
+        // stale descriptor or the old bootstrap membership (BUG-024)
+        wb.delete(&crate::sm::applied_key(rep.id));
+        wb.delete(&crate::sm::range_key(rep.id));
+        wb.delete(&crate::sm::frozen_key(rep.id));
+        wb.delete(&base_key(rep.id));
+        let sp = crate::sm::session_key(rep.id, 0);
+        let sp = sp[..sp.len() - 8].to_vec();
+        let mut se = sp.clone();
+        se.extend_from_slice(&[0xff; 9]);
+        for (k, _) in self.db.scan(&sp, &se, 0).unwrap_or_default() {
+            wb.delete(&k);
         }
         let _ = self.db.write(wb);
         let _ = std::fs::remove_dir_all(format!("{}/raft/{}", self.cfg.data_dir, rep.id));

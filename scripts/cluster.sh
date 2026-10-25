@@ -14,6 +14,9 @@ case "$cmd" in
   up)
     [ -x "$BIN/rkv-server" ] || { echo "build first: make build"; exit 1; }
     "$0" down >/dev/null 2>&1 || true
+    # every `up` is a FRESH cluster: reusing the previous run's data made each benchmark start on top of the last one's state
+    # (BUG-028). RKV_KEEP_DATA=1 keeps it for restart experiments.
+    [ "${RKV_KEEP_DATA:-0}" = 1 ] || rm -rf "$DIR"/pd "$DIR"/s[0-9]*
     mkdir -p "$DIR"; : > "$DIR/pids"
     peers=""; for i in $(seq 1 "$N"); do peers+="${peers:+,}$i=127.0.0.1:$((20160+i))"; done
     if [ "$MODE" = "pd" ]; then
@@ -31,7 +34,15 @@ case "$cmd" in
     if [ "$MODE" = "pd" ]; then echo "pd: $PDADDR"; fi
     ;;
   down)
-    if [ -f "$DIR/pids" ]; then while read -r p; do kill -9 "$p" 2>/dev/null || true; done < "$DIR/pids"; rm -f "$DIR/pids"; fi
+    if [ -f "$DIR/pids" ]; then
+      while read -r p; do kill -9 "$p" 2>/dev/null || true; done < "$DIR/pids"
+      # wait until the processes are really gone (a big server takes a moment to exit) so the next `up` can bind its ports
+      while read -r p; do for _ in $(seq 1 100); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done; done < "$DIR/pids"
+      rm -f "$DIR/pids"
+    fi
+    for port in 23790 $(seq 20161 20165) $(seq 20181 20185); do
+      for _ in $(seq 1 100); do (echo > "/dev/tcp/127.0.0.1/$port") 2>/dev/null || break; sleep 0.1; done
+    done
     echo "cluster stopped" ;;
   status)
     for i in 1 2 3 4 5; do curl -sf "http://127.0.0.1:$((20180+i))/readyz" >/dev/null 2>&1 && echo "store $i: ready" || true; done ;;

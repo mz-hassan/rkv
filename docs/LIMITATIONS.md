@@ -51,3 +51,26 @@
 ## Not implemented
 * Per-pair kernel partitions, TLS/auth, OpenTelemetry tracing, SQL, cross-DC placement, online schema changes, a leaderless
   comparison harness (the stretch pick was the lease service instead).
+
+## Large values: snapshots and state copies are held in memory
+Found while running R1 with 16 KB values on a 15 GB VM: a single-node server holding ~1.6 GB of values (100k x 16 KB) grew to
+~14 GB resident. Building and shipping a Raft snapshot materialises the whole range in memory (and the log, memtables and
+message copies add more), so memory is a multiple of the data size. Ranges are meant to split at 96 MB so this is bounded in
+normal operation, but a single huge unsplit range is not. For the benchmark, the 16 KB-value runs use 10x fewer records and
+ops (for rkv and etcd alike), and the result files record the sizes used. Streaming snapshots would fix it.
+
+## Scans are slow (YCSB-E is 9% of RocksDB)
+After removing the per-scan memtable copy (BUG-027), short scans are still about 11x slower than RocksDB (13.9k vs 154k ops/s on a
+1M-record dataset). The merge iterator opens and seeks every SSTable for each scan. Not optimised further on purpose.
+
+## Memory grows during sustained load
+In a 10-minute write soak, server RSS grew from ~55 MB to 650 to 780 MB and was still rising slowly (2 to 9% over the second half).
+It was not investigated; it may be the memtable/block-cache budget filling up rather than a leak, but the run cannot tell.
+
+## Cluster benchmarks are disk-bound
+All nodes of the benchmark clusters were processes on one VM with one shared disk (about 60 to 100% of its IOPS budget during
+write tests). Throughput numbers for writes, and the sharding experiment (more ranges = lower throughput), mostly measure that disk.
+
+## Some R2 experiments recorded zero trials
+`R2-pause`, `R2-partition-nocheckquorum` and `R2-partition-neither` show 0 completed trials in `RESULTS.md`. No conclusion (for
+example about PreVote or CheckQuorum under a leader isolation) can be drawn from them.

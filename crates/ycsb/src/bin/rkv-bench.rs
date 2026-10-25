@@ -798,14 +798,32 @@ async fn run_txn_bank(a: &Args) {
                                                            // audit: total must be conserved
     let mut total = 0i64;
     let mut audit_ok = false;
-    for _ in 0..5 {
-        let mut t = tc.begin().await.unwrap();
+    // the audit may run while the cluster is still re-electing after membership changes: retry until the reads succeed
+    let mut audit_err = String::new();
+    for _ in 0..60 {
+        let mut t = match tc.begin().await {
+            Ok(t) => t,
+            Err(e) => {
+                audit_err = format!("begin: {e:?}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
         let mut sum = 0i64;
         let mut ok = true;
         for i in 0..accounts {
             match t.get(&key(i)).await {
                 Ok(Some(v)) => sum += String::from_utf8(v).unwrap().parse::<i64>().unwrap(),
-                _ => ok = false,
+                Ok(None) => {
+                    audit_err = format!("account {i} missing");
+                    ok = false;
+                    break;
+                }
+                Err(e) => {
+                    audit_err = format!("read {i}: {e:?}");
+                    ok = false;
+                    break;
+                }
             }
         }
         if ok {
@@ -813,6 +831,10 @@ async fn run_txn_bank(a: &Args) {
             audit_ok = true;
             break;
         }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !audit_ok {
+        eprintln!("AUDIT COULD NOT READ ALL ACCOUNTS (unavailable, not a conservation result): {audit_err}");
     }
     let attempts = commits.load(Ordering::Relaxed) + conflicts.load(Ordering::Relaxed) + aborted.load(Ordering::Relaxed) + other.load(Ordering::Relaxed);
     let body = json!({

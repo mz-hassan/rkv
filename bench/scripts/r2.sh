@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # R2: failover unavailability windows (>=100 trials per fault), election-timeout sweep, PreVote/CheckQuorum effect, snapshot catch-up.
 source "$(dirname "$0")/lib.sh"; need rkv-chaos rkv-server; banner R2
-TR=$(pick 2 100)
+TR=$(pick 2 "${R2_TRIALS:-100}")
 for fault in kill pause partition; do
   run $BIN/rkv-chaos failover --fault $fault --trials $TR --id R2-$fault --out $OUT
 done
@@ -14,6 +14,6 @@ run $BIN/rkv-chaos failover --fault partition --trials $TR --no-prevote --id R2-
 run $BIN/rkv-chaos failover --fault partition --trials $TR --no-check-quorum --id R2-partition-nocheckquorum --out $OUT
 run $BIN/rkv-chaos failover --fault partition --trials $TR --no-prevote --no-check-quorum --id R2-partition-neither --out $OUT
 # lagging replica catch-up through a snapshot
-for mb in $(pick "4" "100 1000"); do
+for mb in $(pick "4" "${R2_SNAP_MB:-100 1000}"); do
   run $BIN/rkv-chaos catchup --mb $mb --id R2-catchup-${mb}mb --out $OUT
 done

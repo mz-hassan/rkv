@@ -2,11 +2,13 @@
 # R1: replicated throughput/latency. nodes x mix x value size x batching/pipelining x read mode; etcd baseline via etcd_baseline.sh.
 source "$(dirname "$0")/lib.sh"; need rkv-bench rkv-server; banner R1
 REC=$(pick 300 100000); OPS=$(pick 600 100000); CL=$(pick 4 32); SECS=0
-for n in $(pick "3" "1 3 5"); do
-  for sz in $(pick "128" "128 1024 16384"); do
+for n in $(pick "3" "${R1_NODES:-1 3 5}"); do
+  for sz in $(pick "128" "${R1_SIZES:-128 1024 16384}"); do
+    # 16 KB values: 10x fewer records/ops (the snapshot path holds a whole range in memory, see LIMITATIONS.md); same for etcd
+    if [ "$sz" -ge 16384 ]; then RECX=$((REC/10)); OPSX=$((OPS/10)); else RECX=$REC; OPSX=$OPS; fi
     for mix in w a r; do   # w=100% write, a=50/50, r=100% read
       cluster up $n; wait_ready
-      run $BIN/rkv-bench cluster --seeds "$(scripts/cluster.sh env $n | grep SEEDS | cut -d= -f2)" --workload $mix --records $REC --ops $OPS --clients $CL --value-size $sz \
+      run $BIN/rkv-bench cluster --seeds "$(scripts/cluster.sh env $n | grep SEEDS | cut -d= -f2)" --workload $mix --records $RECX --ops $OPSX --clients $CL --value-size $sz \
         --id R1-${n}n-mix$mix-v$sz --cluster-label "rkv ${n} nodes localhost" --out $OUT
       cluster down
     done

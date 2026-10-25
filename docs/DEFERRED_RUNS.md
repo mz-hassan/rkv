@@ -11,3 +11,12 @@
 | **Full-scale sweeps** (S1/S2/R1/R2/R3/D1/D2/soak) | hours of an idle, plugged-in machine | `make bench-local` (or each `make bench-*`) | every script run at `SCALE=smoke` into a throwaway directory |
 
 Order of execution recommended in `README.md` ("Next steps").
+
+
+## Status update (2026-10-25)
+* **K1 (Kubernetes):** rolling upgrade (about 280 s) and scale-out passed repeatedly; scale-in under load never completed a full run,
+  but each attempt exposed a real bug (BUG-021 to BUG-026), all now fixed and covered by `bench/scripts/churn_local.sh` (6 cycles of
+  drain / kill / re-add under bank load, total conserved). A final full K1 run on `kind` is still open.
+* **N1 on real separate machines:** still deferred; the simulated-machine version ran on one Azure VM.
+* **Not run / trimmed:** D1 with 64 ranges, rkv R1 at 5 nodes and 1 KB / 16 KB values, R1 batching "neither" ablation, failover
+  experiments at 100 trials (20 used).

@@ -297,19 +297,19 @@ async fn main() {
                     for attempt in 0..40 {
                         if attempt > 0 {
                             tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-                            c.router.refresh_all().await.map_err(|e| e.to_string())?;
+                            let _ = c.router.refresh_all().await; // transient routing gaps while ranges are being split are retried
                         }
-                        let info = c.router.locate(k.as_bytes()).await.map_err(|e| e.to_string())?;
+                        let Ok(info) = c.router.locate(k.as_bytes()).await else { continue };
                         if info.start == k.as_bytes() {
                             done = true; // already a boundary (possibly because an earlier attempt succeeded)
                             break;
                         }
-                        for addr in all_store_addrs(&pd, &seeds).await? {
-                            let r = AdminClient::new(::kv_client::pd::channel(&addr)?)
-                                .split_range(SplitReq { range_id: info.id, split_key: k.as_bytes().to_vec() })
-                                .await
-                                .map_err(|e| e.to_string())?
-                                .into_inner();
+                        for addr in all_store_addrs(&pd, &seeds).await.unwrap_or_default() {
+                            let Ok(ch) = ::kv_client::pd::channel(&addr) else { continue };
+                            let Ok(r) = AdminClient::new(ch).split_range(SplitReq { range_id: info.id, split_key: k.as_bytes().to_vec() }).await else {
+                                continue;
+                            };
+                            let r = r.into_inner();
                             if r.error.is_none() {
                                 done = true;
                                 break;
@@ -323,7 +323,7 @@ async fn main() {
                         return Err(format!("could not split at {k}"));
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(1500)).await; // let PD learn the new range before the next key
-                    c.router.refresh_all().await.map_err(|e| e.to_string())?;
+                    let _ = c.router.refresh_all().await;
                 }
                 println!("presplit done");
             }

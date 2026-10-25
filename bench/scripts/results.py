@@ -4,7 +4,7 @@
 Rules (see docs/BENCHMARKS.md): numbers come ONLY from bench/results/**/result.json (and sim summaries);
 experiments without data print "NOT RUN". Nothing here is hard-coded.
 """
-import glob, json, os, sys, time
+import glob, json, os, re, sys, time
 from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -290,9 +290,25 @@ def section_n1(by):
 
 
 def section_misc(by):
-    o = "## K1 - Kubernetes (kind)\n\n"
+    o = "## Membership churn under load (local, real processes)\n\n"
+    c = latest(by, "churn-local")
+    if not c:
+        o += "_NOT RUN_\n\n"
+    else:
+        cyc = "?"
+        lf = os.path.join(os.path.dirname(os.path.join(ROOT, c["_file"])), "run.log")
+        if os.path.exists(lf):
+            m = re.search(r"CHURN OK: (\d+) cycles", open(lf).read())
+            cyc = m.group(1) if m else "?"
+        x = c["results"]
+        o += (f"1 PD + 5 stores; {cyc} cycles of: drain store 5, drain store 4, kill both, restart them with their old data, let PD rebalance, "
+              f"all under a bank-transfer workload.\n\n| cycles | commits | other errors | audit total / expected | bank invariant |\n|---|---|---|---|---|\n"
+              f"| {cyc} | {x['commits']:,} | {x['other_errors']} | {x['audit_total']:,} / {x['audit_expected']:,} | {x['invariant_ok']} |\n\n"
+              f"> **Labels:** {c['labels'].get('scope','')}; faults: stores drained, killed (kill -9) and re-added; script `bench/scripts/churn_local.sh`\n\n")
+    o += "## K1 - Kubernetes (kind)\n\n"
     r = latest(by, "K1-rolling-upgrade")
-    o += "_NOT RUN_ (needs Docker/colima + kind)\n\n" if not r else f"bank invariant ok: {r['results']['invariant_ok']}; commits {r['results']['commits']}\n\n"
+    o += ("_NOT COMPLETED_: the rolling upgrade (283 s) and scale-out passed repeatedly, but the scale-in step never finished a full run; "
+          "each attempt found a real bug (BUG-021 to BUG-026, see docs/BUGS_FOUND.md). The same churn is covered by the local test above.\n\n") if not r else f"bank invariant ok: {r['results']['invariant_ok']}; commits {r['results']['commits']}\n\n"
     o += "## N1 on separate real machines\n\n_NOT RUN_ (the simulated-machine version above ran on one Azure VM; real multi-VM runs are deferred, see docs/DEFERRED_RUNS.md)\n\n"
     o += "## Fuzzing\n\n"
     rows = []

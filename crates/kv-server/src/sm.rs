@@ -127,16 +127,16 @@ pub struct RangeSm {
     pub writes: AtomicU64,
 }
 
-fn applied_key(id: u64) -> Vec<u8> {
+pub(crate) fn applied_key(id: u64) -> Vec<u8> {
     meta_key("applied", id)
 }
-fn range_key(id: u64) -> Vec<u8> {
+pub(crate) fn range_key(id: u64) -> Vec<u8> {
     meta_key("range", id)
 }
-fn frozen_key(id: u64) -> Vec<u8> {
+pub(crate) fn frozen_key(id: u64) -> Vec<u8> {
     meta_key("frozen", id)
 }
-fn session_key(id: u64, client: u64) -> Vec<u8> {
+pub(crate) fn session_key(id: u64, client: u64) -> Vec<u8> {
     let mut k = meta_key("session", id);
     k.extend_from_slice(&client.to_be_bytes());
     k

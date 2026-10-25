@@ -145,6 +145,82 @@ connections alive; fixed by running each test node on its own runtime and droppi
 - **Fix:** one write per ledger line; ignore a torn final line. The invalid result set is kept under `bench/invalid/` for
   transparency; the corrected re-run is a separate result. 40 kill/recover cycles after the fix: 534,207 acknowledged keys, 0 violations.
 
+## BUG-021: MVCC GC deleted the only committed value under a rollback marker (data loss)
+- **Found by:** K1 (rolling upgrade + scale under bank load): the final audit could not read accounts 32, 41, 42 for 60 s; a
+  transactional read from a fresh client confirmed they were gone from every replica. Neighbouring accounts were intact.
+- **Root cause:** `gc_key` treated the first write record at or below the safe point as "the visible version" even when it was a
+  Rollback/Lock marker (a conflicting transaction that gave up). The real Put below it was then deleted as "older".
+- **Fix:** only a Put counts as the retained visible version; Rollback/Lock markers are dropped; a Delete drops itself and
+  everything older. Regression test `gc_keeps_value_below_rollback_marker`.
+- **Why the faster tests missed it:** GC only runs every ~60 s with a 10-minute retention window, so only the 25-minute K1 run
+  reached it.
+
+## BUG-022: a store could never rejoin a range it had been removed from
+- **Found by:** K1 scale-in stalling for 15 min with the range stuck on "4 voters + learner on store 3".
+- **Root cause:** destroying a replica wrote a permanent tombstone and the raft ingress dropped every message for tombstoned
+  ranges, so PD adding the store back as a learner (balancing, then draining) never created the replica.
+- **Fix:** removal tombstones are marked revivable (persisted); a message from a peer whose current descriptor lists this store
+  re-creates the replica (throttled). Merged-away ranges stay permanently tombstoned.
+
+## BUG-023: PD blocked on learners placed on dead or draining stores
+- **Found by:** K1 again, draining the second store: PD added a learner to a store whose pod had just been removed and then
+  waited for it forever (the scheduler skips ranges that have learners).
+- **Fix:** learners on non-alive stores are removed first. Also: the bank benchmark's final audit now retries for 60 s and reports
+  "could not read" separately from a conservation violation (the old message "total 0" was misleading).
+
+## BUG-024: destroying a replica left its metadata behind, so a re-added replica started from a stale state
+- **Found by:** K1 scale-in (third stall): a revived replica reported `commit=0 applied=141 bytes=0 peers=[2,3,4,5]` and leadership
+  transfer to it never completed.
+- **Root cause:** `destroy_replica` deleted the range's data but not its per-replica meta keys (applied index, descriptor, frozen
+  marker, client sessions, bootstrap membership). Once BUG-022 allowed a store to rejoin, the new replica believed it had applied
+  entries whose data was gone.
+- **Fix:** destroy removes all of those keys as well.
+
+## BUG-025: a replica being re-added destroyed itself while replaying history
+- **Found by:** K1 scale-in (fourth stall): the learner on the re-added store sat at `commit=0 applied=0` and the same range's
+  replica on that store was destroyed three times in 8 minutes.
+- **Root cause:** a fresh replica replays the group's log from index 1. That history contains the old config entry that removed
+  this same store, so for a moment the replica saw itself outside the group while caught up, and the "removed from group" rule
+  tore it down, restarting the cycle.
+- **Fix:** with a PD present, replicas no longer destroy themselves on a local view of the log; PD's replica GC (which sees the
+  leader's authoritative peer list) decides. A first attempt (require the removed state to hold for ~10 s) was not enough: a
+  slow catch-up can sit in that state longer, found by the local churn test. Without PD the old rule stays, with the 10 s debounce.
+
+## BUG-026: PD replica GC destroyed freshly added learners using a stale timer
+- **Found by:** the local churn test (`bench/scripts/churn_local.sh`), cycle 2: a learner replica was destroyed right after being
+  created and the range never finished moving.
+- **Root cause:** PD records when a store first reported a replica that the leader does not list ("unlisted"), and only clears
+  that when the store is listed. If the replica disappears and the same range is later added again, the new learner inherited the
+  old timer, so the 30 s grace period looked expired and PD ordered it destroyed on its first report.
+- **Fix:** forget the timer for any replica the store stops reporting.
+
+## BUG-027: short scans copied the whole memtable (performance)
+- **Found by:** the first Azure S1 run: YCSB workloads A to D took ~10 s each, workload E (95% short scans) ran for 18+ minutes at
+  full CPU and had to be killed.
+- **Root cause:** `Memtable::range` copies every matching entry into a Vec, and `scan_at` called it with no upper bound for every
+  scan, so each 1-to-100-key scan cost O(memtable). `has_tombstone_for` did the same just to peek at one entry.
+- **Fix:** copy only a bounded prefix of each memtable (`range_n`), and redo the scan with a larger bound if the merge reaches the
+  point where a truncated memtable stops being complete. Regression test `limited_scan_matches_unbounded_scan` compares
+  limited and unlimited scans over keys with five versions each plus deletes.
+- **Why tests missed it:** correctness was fine; only a million-entry memtable made it visible.
+
+## BUG-028: benchmark clusters were never wiped between runs (benchmark integrity)
+- **Found by:** the first Azure R1 run: a single-node server grew to 14 GB of memory on a 1.6 GB dataset, and `/tmp/rkv-cluster`
+  held 3.6 GB. The server was replaying earlier runs' logs.
+- **Root cause:** `scripts/cluster.sh up` stopped the old processes but reused the old data directories, so every benchmark in a
+  script started on top of the state left by the previous one.
+- **Fix:** `up` now starts from empty data directories (`RKV_KEEP_DATA=1` opts out). Cluster results collected before the fix
+  were discarded and rerun.
+- **Why it matters:** it would have produced slower, noisier and unexplainable cluster numbers without any error.
+
+## BUG-029: benchmark harness race between stopping and starting a cluster
+- **Found by:** Azure R1 run stopped with "cluster not ready"; the new server's log said `Address already in use`.
+- **Root cause:** `cluster.sh down` sent `kill -9` and returned immediately, and the next `up` started before the old process had
+  exited and released its ports.
+- **Fix:** `down` waits for the processes to disappear and the ports to free up. The etcd baseline script had the same flaw (its
+  5-member cluster failed to start next to the lingering 3-member one and the benchmark client hung); fixed the same way. The
+  affected runs were repeated.
+
 ## BUG-009b: "non-strict" fsync on macOS was actually a full drive-cache flush
 - **Found by:** a sanity check of the RocksDB baseline: with `sync=true` it reported ~109k ops/s against ~0.7k for rkv with the same
   nominal durability. The gap was too big to be an engine difference.
